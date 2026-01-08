@@ -18,6 +18,9 @@ class FailurePoint(str, Enum):
     STATUS_CHECK = "fail_on_status_check"
     AVAILABILITY = "fail_on_availability"
     INPUT_SCHEMA = "fail_on_input_schema"
+    HITL_APPROVAL = "fail_on_hitl_approval"
+    HITL_TIMEOUT = "fail_on_hitl_timeout"
+    HITL_REJECTION = "fail_on_hitl_rejection"
 
 class FailureType(str, Enum):
     """Types of failures to simulate"""

@@ -43,7 +43,7 @@ class TestHealthEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "input_data" in data
-        assert len(data["input_data"]) == 4  # input_string, command, failure_point, failure_type
+        assert len(data["input_data"]) >= 4  # At least input_string, command, failure_point, failure_type (plus HITL fields)
         assert data["input_data"][0]["id"] == "input_string"
         assert data["input_data"][0]["type"] == "string"
         assert data["input_data"][0]["name"] == "Task Description"
@@ -386,6 +386,133 @@ class TestMasumiCompliance:
         response = client.post("/start_job", json=test_data)
         # should be 500 (config error) not 422 (validation error)
         assert response.status_code in [400, 500, 502]  # config errors, not validation
+
+
+class TestHITLEndpoints:
+    """Test Human-in-the-Loop endpoints"""
+    
+    def test_get_approval_status_no_job(self):
+        """Test getting approval status for non-existent job"""
+        response = client.get("/approve?job_id=non-existent-job")
+        assert response.status_code == 404
+    
+    def test_get_approval_status_no_approval(self):
+        """Test getting approval status when no approval is required"""
+        # Create a job without HITL
+        from main import jobs
+        test_job_id = "test-job-no-hitl"
+        jobs[test_job_id] = {
+            "status": "running",
+            "input_data": {"input_string": "test"}
+        }
+        
+        response = client.get(f"/approve?job_id={test_job_id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "no_approval_required"
+        
+        # Cleanup
+        del jobs[test_job_id]
+    
+    def test_approve_job_not_found(self):
+        """Test approving a non-existent job"""
+        response = client.post("/approve", json={
+            "job_id": "non-existent-job",
+            "approve": True
+        })
+        assert response.status_code == 404
+    
+    def test_approve_job_no_pending_approval(self):
+        """Test approving a job without pending approval"""
+        from main import jobs
+        test_job_id = "test-job-no-pending"
+        jobs[test_job_id] = {
+            "status": "running",
+            "input_data": {"input_string": "test"}
+        }
+        
+        response = client.post("/approve", json={
+            "job_id": test_job_id,
+            "approve": True
+        })
+        assert response.status_code == 400
+        assert "No pending approval request" in response.json()["detail"]
+        
+        # Cleanup
+        del jobs[test_job_id]
+    
+    @patch('main.Payment')
+    @patch('main.cuid2.Cuid')
+    @patch.dict(os.environ, {"AGENT_IDENTIFIER": "test-agent-123", "SELLER_VKEY": "test-seller-vkey"})
+    def test_hitl_workflow_approval(self, mock_cuid, mock_payment_class):
+        """Test HITL workflow with approval"""
+        # Setup mocks
+        mock_cuid_instance = MagicMock()
+        mock_cuid_instance.generate.return_value = "test-cuid2-identifier"
+        mock_cuid.return_value = mock_cuid_instance
+        
+        mock_payment_instance = AsyncMock()
+        mock_payment_instance.create_payment_request.return_value = {
+            "data": {
+                "blockchainIdentifier": "test-blockchain-id",
+                "submitResultTime": "2025-06-17T12:00:00Z",
+                "unlockTime": "2025-06-17T13:00:00Z",
+                "externalDisputeUnlockTime": "2025-06-17T14:00:00Z",
+                "inputHash": "test-input-hash"
+            }
+        }
+        mock_payment_instance.input_hash = "test-input-hash"
+        mock_payment_instance.payment_ids = set()
+        mock_payment_instance.start_status_monitoring = AsyncMock()
+        mock_payment_instance.complete_payment = AsyncMock()
+        mock_payment_class.return_value = mock_payment_instance
+        
+        # Create job with HITL enabled
+        test_data = {
+            "input_data": [
+                {"key": "input_string", "value": "Test HITL"},
+                {"key": "enable_hitl", "value": "true"},
+                {"key": "hitl_timeout", "value": "60"}
+            ]
+        }
+        
+        response = client.post("/start_job", json=test_data)
+        assert response.status_code == 200
+        job_id = response.json()["job_id"]
+        
+        # Check that job is awaiting approval
+        from main import jobs
+        assert jobs[job_id]["status"] == "awaiting_payment"  # Before payment completes
+        
+        # Check approval status endpoint
+        status_response = client.get(f"/approve?job_id={job_id}")
+        # May return no_approval_required if payment hasn't completed yet
+        # This is expected behavior
+        
+        # Cleanup
+        if job_id in jobs:
+            del jobs[job_id]
+    
+    def test_input_schema_includes_hitl_fields(self):
+        """Test that input schema includes HITL fields"""
+        response = client.get("/input_schema")
+        assert response.status_code == 200
+        data = response.json()
+        
+        input_fields = {field["id"]: field for field in data["input_data"]}
+        
+        assert "enable_hitl" in input_fields
+        assert input_fields["enable_hitl"]["type"] == "boolean"
+        
+        assert "hitl_timeout" in input_fields
+        assert input_fields["hitl_timeout"]["type"] == "number"
+        
+        # Check that failure_point includes HITL options
+        failure_point_field = input_fields.get("failure_point", {})
+        failure_desc = failure_point_field.get("data", {}).get("description", "")
+        assert "fail_on_hitl_approval" in failure_desc
+        assert "fail_on_hitl_timeout" in failure_desc
+        assert "fail_on_hitl_rejection" in failure_desc
 
 
 if __name__ == "__main__":

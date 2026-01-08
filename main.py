@@ -2,6 +2,7 @@ import os
 import uvicorn
 import uuid
 import time
+from typing import Optional
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -10,8 +11,10 @@ from masumi.config import Config
 from masumi.payment import Payment
 from agentic_service import get_agentic_service
 from failure_injector import FailureInjector, FailurePoint, FailureType
+from hitl_manager import HITLManager, ApprovalStatus
 from logging_config import setup_logging
 import cuid2
+import asyncio
 
 #region congif
 # Configure logging
@@ -117,6 +120,11 @@ server_start_time = time.time()
 failure_injector = FailureInjector()
 
 # ─────────────────────────────────────────────────────────────────────────────
+#region Initialize HITL Manager
+# ─────────────────────────────────────────────────────────────────────────────
+hitl_manager = HITLManager()
+
+# ─────────────────────────────────────────────────────────────────────────────
 #region Pydantic Models
 # ─────────────────────────────────────────────────────────────────────────────
 class InputDataItem(BaseModel):
@@ -137,6 +145,13 @@ class StartJobRequest(BaseModel):
 
 class ProvideInputRequest(BaseModel):
     job_id: str
+
+class ApprovalRequest(BaseModel):
+    job_id: str
+    action: Optional[str] = "task_execution"
+    approve: bool = True
+    reason: Optional[str] = None
+    operator: Optional[str] = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 #region Task Execution THIS IS THE MAIN ENTRY POINT
@@ -360,6 +375,95 @@ async def handle_payment_status(job_id: str, payment_id: str) -> None:
                 failure_type,
                 "Debug: Intentional failure during task execution"
             )
+        
+        # HITL: Check if HITL is enabled for this job
+        enable_hitl = input_data.get("enable_hitl", "false").lower() == "true"
+        hitl_timeout = int(input_data.get("hitl_timeout", "300"))  # Default 5 minutes
+        
+        if enable_hitl:
+            logger.info(f"HITL enabled for job {job_id}, requesting approval...")
+            
+            # Create approval request
+            action_description = f"Execute debug task: {input_data.get('input_string', 'N/A')}"
+            approval_info = hitl_manager.create_approval_request(
+                job_id=job_id,
+                action=action_description,
+                timeout_seconds=hitl_timeout,
+                metadata={
+                    "input_data": input_data,
+                    "payment_id": payment_id
+                }
+            )
+            
+            # Update job status to awaiting approval
+            jobs[job_id]["status"] = "awaiting_human_approval"
+            jobs[job_id]["approval_info"] = approval_info
+            
+            # Check for failure injection during HITL approval wait
+            hitl_failure_type = failure_injector.should_fail(
+                FailurePoint.HITL_APPROVAL,
+                input_data
+            )
+            if hitl_failure_type:
+                logger.warning(f"Injecting failure during HITL approval wait for job {job_id}")
+                failure_injector.inject_failure(
+                    FailurePoint.HITL_APPROVAL,
+                    hitl_failure_type,
+                    "Debug: Intentional failure during HITL approval"
+                )
+            
+            # Check for timeout failure injection
+            hitl_timeout_failure = failure_injector.should_fail(
+                FailurePoint.HITL_TIMEOUT,
+                input_data
+            )
+            
+            # Wait for approval
+            approval_status = await hitl_manager.wait_for_approval(job_id)
+            
+            if approval_status == ApprovalStatus.TIMEOUT:
+                jobs[job_id]["status"] = "failed"
+                jobs[job_id]["error"] = "HITL approval timeout"
+                
+                # Inject timeout failure if configured
+                if hitl_timeout_failure:
+                    failure_injector.inject_failure(
+                        FailurePoint.HITL_TIMEOUT,
+                        hitl_timeout_failure,
+                        "Debug: Intentional failure on HITL timeout"
+                    )
+                else:
+                    error_result = {"error": "HITL approval timeout - task execution cancelled", "status": "failed"}
+                    await payment_instances[job_id].complete_payment(payment_id, error_result)
+                    return
+            
+            elif approval_status == ApprovalStatus.REJECTED:
+                jobs[job_id]["status"] = "rejected"
+                jobs[job_id]["error"] = "Task execution rejected by operator"
+                
+                # Check for rejection failure injection
+                rejection_failure = failure_injector.should_fail(
+                    FailurePoint.HITL_REJECTION,
+                    input_data
+                )
+                if rejection_failure:
+                    failure_injector.inject_failure(
+                        FailurePoint.HITL_REJECTION,
+                        rejection_failure,
+                        "Debug: Intentional failure on HITL rejection"
+                    )
+                else:
+                    error_result = {"error": "Task execution rejected by operator", "status": "rejected"}
+                    await payment_instances[job_id].complete_payment(payment_id, error_result)
+                    return
+            
+            elif approval_status == ApprovalStatus.APPROVED:
+                logger.info(f"Job {job_id} approved, proceeding with task execution...")
+                jobs[job_id]["status"] = "running"
+            else:
+                error_result = {"error": f"Unexpected approval status: {approval_status}", "status": "failed"}
+                await payment_instances[job_id].complete_payment(payment_id, error_result)
+                return
 
         # Execute the AI task
         try:
@@ -472,6 +576,94 @@ async def get_status(job_id: str):
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
+#region HITL Approval Endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/approve")
+async def approve_job(request: ApprovalRequest):
+    """
+    Human-in-the-Loop approval endpoint.
+    Allows human operators to approve or reject pending task executions.
+    """
+    job_id = request.job_id
+    
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Check for failure injection on approval endpoint
+    job = jobs[job_id]
+    input_data = job.get("input_data", {})
+    failure_type = failure_injector.should_fail(
+        FailurePoint.HITL_APPROVAL,
+        input_data
+    )
+    if failure_type:
+        failure_injector.inject_failure(
+            FailurePoint.HITL_APPROVAL,
+            failure_type,
+            "Debug: Intentional failure on approval endpoint"
+        )
+    
+    approval_status = hitl_manager.get_approval_status(job_id)
+    if not approval_status:
+        raise HTTPException(
+            status_code=400, 
+            detail="No pending approval request found for this job"
+        )
+    
+    if approval_status["status"] != ApprovalStatus.PENDING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Approval already resolved: {approval_status['status']}"
+        )
+    
+    if request.approve:
+        success = hitl_manager.approve(job_id, request.operator)
+        if success:
+            return {
+                "job_id": job_id,
+                "status": "approved",
+                "message": "Task execution approved"
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to approve job")
+    else:
+        success = hitl_manager.reject(job_id, request.reason, request.operator)
+        if success:
+            return {
+                "job_id": job_id,
+                "status": "rejected",
+                "reason": request.reason,
+                "message": "Task execution rejected"
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to reject job")
+
+@app.get("/approve")
+async def get_approval_status(job_id: str):
+    """
+    Get current approval status for a job.
+    """
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    approval_info = hitl_manager.get_approval_status(job_id)
+    if not approval_info:
+        return {
+            "job_id": job_id,
+            "status": "no_approval_required",
+            "message": "No approval request for this job"
+        }
+    
+    return {
+        "job_id": job_id,
+        "status": approval_info["status"],
+        "action": approval_info["action"],
+        "timeout_seconds": approval_info["timeout"],
+        "elapsed_seconds": time.time() - approval_info["timestamp"],
+        "remaining_seconds": max(0, approval_info["timeout"] - (time.time() - approval_info["timestamp"]))
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
 #region 4) Check Server Availability (MIP-003: /availability)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/availability")
@@ -537,7 +729,7 @@ async def input_schema():
                 "type": "string",
                 "name": "Failure Point (Optional)",
                 "data": {
-                    "description": "Point to inject failure: fail_on_start_job, fail_on_payment_creation, fail_on_task_execution, fail_on_payment_completion, fail_on_status_check",
+                    "description": "Point to inject failure: fail_on_start_job, fail_on_payment_creation, fail_on_task_execution, fail_on_payment_completion, fail_on_status_check, fail_on_hitl_approval, fail_on_hitl_timeout, fail_on_hitl_rejection",
                     "placeholder": "fail_on_start_job"
                 }
             },
@@ -548,6 +740,24 @@ async def input_schema():
                 "data": {
                     "description": "Type of failure: http_400, http_404, http_500, http_503, timeout, exception, invalid_response",
                     "placeholder": "http_500"
+                }
+            },
+            {
+                "id": "enable_hitl",
+                "type": "boolean",
+                "name": "Enable HITL (Optional)",
+                "data": {
+                    "description": "Enable Human-in-the-Loop approval workflow (true/false)",
+                    "placeholder": "false"
+                }
+            },
+            {
+                "id": "hitl_timeout",
+                "type": "number",
+                "name": "HITL Timeout (Optional)",
+                "data": {
+                    "description": "Timeout in seconds for HITL approval (default: 300)",
+                    "placeholder": "300"
                 }
             }
         ]
