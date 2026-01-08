@@ -92,13 +92,9 @@ class AgenticService:
         if not text_input:
             text_input = input_data.get("text", "")
         
-        # If no text but has command, create text from command
-        if not text_input and "command" in input_data:
-            text_input = f"Execute command: {input_data.get('command', 'debug_test')}"
-        
         # Validate that we have some input
         if not text_input or not text_input.strip():
-            error_msg = "No valid input text provided. Provide 'input_string', 'text', or 'command' in input_data."
+            error_msg = "No valid input text provided. Provide 'input_string' or 'text' in input_data."
             if self.logger:
                 self.logger.error(error_msg)
             raise ValueError(error_msg)

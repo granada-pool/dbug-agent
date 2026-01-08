@@ -49,24 +49,22 @@ class FailureInjector:
     
     def parse_command(self, input_data: Dict[str, Any]) -> Optional[Dict[str, str]]:
         """
-        Parse debug command from input_data.
-        Returns failure config if command is present, None otherwise.
+        Parse failure injection configuration from input_data.
+        Returns failure config if failure_point is present, None otherwise.
+        If no failure configuration is provided, execution proceeds normally.
         """
         if not isinstance(input_data, dict):
             return None
             
-        # Check for explicit debug command
-        if "command" in input_data:
-            command = input_data.get("command", "")
-            failure_point = input_data.get("failure_point", "")
-            failure_type = input_data.get("failure_type", "exception")
-            
-            if command.startswith("debug_") or failure_point:
-                return {
-                    "command": command,
-                    "failure_point": failure_point,
-                    "failure_type": failure_type
-                }
+        # Check for failure_point - if present, we have a failure injection request
+        failure_point = input_data.get("failure_point", "")
+        failure_type = input_data.get("failure_type", "exception")
+        
+        if failure_point:
+            return {
+                "failure_point": failure_point,
+                "failure_type": failure_type
+            }
         
         # Check for legacy format: text field with command
         text = input_data.get("text", "")
@@ -76,7 +74,6 @@ class FailureInjector:
                 failure_point = parts[1].strip()
                 failure_type = parts[2].strip() if len(parts) > 2 else "exception"
                 return {
-                    "command": "debug",
                     "failure_point": failure_point,
                     "failure_type": failure_type
                 }

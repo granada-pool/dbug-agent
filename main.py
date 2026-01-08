@@ -727,52 +727,70 @@ async def input_schema():
                 }
             },
             {
-                "id": "command",
-                "type": "string",
-                "name": "Debug Command",
-                "required": False,
-                "data": {
-                    "description": "Debug command to execute (e.g., 'debug_test')",
-                    "placeholder": "debug_test"
-                }
-            },
-            {
                 "id": "failure_point",
-                "type": "string",
-                "name": "Failure Point",
+                "type": "option",
+                "name": "Failure Point (Optional)",
                 "required": False,
                 "data": {
-                    "description": "Point to inject failure: fail_on_start_job, fail_on_payment_creation, fail_on_task_execution, fail_on_payment_completion, fail_on_status_check, fail_on_hitl_approval, fail_on_hitl_timeout, fail_on_hitl_rejection",
-                    "placeholder": "fail_on_start_job"
-                }
+                    "description": "Point to inject failure during execution. If not provided, execution proceeds normally.",
+                    "values": [
+                        "fail_on_start_job",
+                        "fail_on_payment_creation",
+                        "fail_on_payment_monitoring",
+                        "fail_on_task_execution",
+                        "fail_on_payment_completion",
+                        "fail_on_status_check",
+                        "fail_on_availability",
+                        "fail_on_input_schema",
+                        "fail_on_hitl_approval",
+                        "fail_on_hitl_timeout",
+                        "fail_on_hitl_rejection"
+                    ]
+                },
+                "validations": [
+                    { "validation": "min", "value": "0" },
+                    { "validation": "max", "value": "1" }
+                ]
             },
             {
                 "id": "failure_type",
-                "type": "string",
-                "name": "Failure Type",
+                "type": "option",
+                "name": "Failure Type (Optional)",
                 "required": False,
                 "data": {
-                    "description": "Type of failure: http_400, http_404, http_500, http_503, timeout, exception, invalid_response",
-                    "placeholder": "http_500"
-                }
+                    "description": "Type of failure to inject. Required if failure_point is specified.",
+                    "values": [
+                        "http_400",
+                        "http_404",
+                        "http_500",
+                        "http_503",
+                        "timeout",
+                        "exception",
+                        "invalid_response"
+                    ]
+                },
+                "validations": [
+                    { "validation": "min", "value": "0" },
+                    { "validation": "max", "value": "1" }
+                ]
             },
             {
                 "id": "enable_hitl",
                 "type": "boolean",
-                "name": "Enable HITL",
+                "name": "Enable HITL (Optional)",
                 "required": False,
                 "data": {
-                    "description": "Enable Human-in-the-Loop approval workflow (true/false)",
+                    "description": "Enable Human-in-the-Loop approval workflow. If not enabled, execution proceeds automatically.",
                     "placeholder": "false"
                 }
             },
             {
                 "id": "hitl_timeout",
                 "type": "number",
-                "name": "HITL Timeout",
+                "name": "HITL Timeout (Optional)",
                 "required": False,
                 "data": {
-                    "description": "Timeout in seconds for HITL approval (default: 300)",
+                    "description": "Timeout in seconds for HITL approval (default: 300). Only used if HITL is enabled.",
                     "placeholder": "300"
                 }
             }
