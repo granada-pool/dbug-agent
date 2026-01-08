@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-service"
+version = "0.1.0"
+description = "Simple Reverse Echo Agent for Masumi Network"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "requests>=2.31.0",
+    "masumi",
+    "python-dotenv",
+    "httpx",
+    "cuid2>=2.0.1",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "httpx>=0.25.0"
+]
+
+[tool.setuptools]
+py-modules = ["main", "reverse_echo_service", "logging_config"]
+
+[tool.pyright]
+include = ["*.py", "**/*.py"]
+exclude = ["**/__pycache__"]
+reportMissingImports = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+pythonVersion = "3.12"

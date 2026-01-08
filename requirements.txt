@@ -1,8 +1,11 @@
-fastapi
-uvicorn
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
 python-dotenv
-crewai
-masumi
-pydantic
-python-multipart
+masumi==0.1.39
 httpx
+requests
+cuid2
+crewai>=0.1.0
+pytest>=7.0.0
+pytest-asyncio>=0.21.0 
