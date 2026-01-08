@@ -758,7 +758,7 @@ async def input_schema():
             },
             {
                 "id": "enable_hitl",
-                "type": "string",
+                "type": "boolean",
                 "name": "Enable HITL",
                 "required": False,
                 "data": {
