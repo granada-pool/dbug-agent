@@ -35,7 +35,7 @@ class TestHealthEndpoints:
         assert data["status"] == "available"
         assert "uptime" in data
         assert isinstance(data["uptime"], int)
-        assert data["message"] == "Server operational."
+        assert data["message"] == "Debug Agent - Server operational. Use input_data with debug commands to test failures."
     
     def test_input_schema_endpoint(self):
         """test /input_schema returns correct schema"""
@@ -43,10 +43,10 @@ class TestHealthEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "input_data" in data
-        assert len(data["input_data"]) == 1
+        assert len(data["input_data"]) == 4  # input_string, command, failure_point, failure_type
         assert data["input_data"][0]["id"] == "input_string"
         assert data["input_data"][0]["type"] == "string"
-        assert data["input_data"][0]["name"] == "Text to Reverse"
+        assert data["input_data"][0]["name"] == "Task Description"
 
 
 class TestStartJobEndpoint:
@@ -251,7 +251,7 @@ class TestOpenAPISchema:
         
         schema = response.json()
         assert schema["openapi"] == "3.1.0"
-        assert schema["info"]["title"] == "API following the Masumi API Standard"
+        assert schema["info"]["title"] == "Debug Agent API - Masumi API Standard"
         assert schema["info"]["version"] == "1.0.0"
         
         # check that all expected endpoints are present
@@ -307,10 +307,11 @@ class TestAgenticService:
         result = await service.execute_task(input_data)
         
         assert isinstance(result, ServiceResult)
-        assert result.original_text == "hello world"
-        assert result.reversed_text == "dlrow olleh"
-        assert result.raw == "dlrow olleh"
-        assert result.json_dict["task"] == "reverse_echo"
+        assert result.input_text == "hello world"
+        assert result.raw is not None
+        assert isinstance(result.raw, str)
+        assert result.json_dict["task"] == "debug_execution"
+        assert result.json_dict["input_text"] == "hello world"
     
     @pytest.mark.asyncio
     async def test_service_empty_input(self):
@@ -318,10 +319,8 @@ class TestAgenticService:
         service = get_agentic_service()
         input_data = {"input_string": ""}
         
-        result = await service.execute_task(input_data)
-        
-        assert result.original_text == ""
-        assert result.reversed_text == ""
+        with pytest.raises(ValueError, match="No valid input text provided"):
+            await service.execute_task(input_data)
     
     @pytest.mark.asyncio
     async def test_service_missing_input_string(self):
@@ -329,10 +328,8 @@ class TestAgenticService:
         service = get_agentic_service()
         input_data = {"other_key": "value"}
         
-        result = await service.execute_task(input_data)
-        
-        assert result.original_text == ""
-        assert result.reversed_text == ""
+        with pytest.raises(ValueError, match="No valid input text provided"):
+            await service.execute_task(input_data)
 
 
 class TestMasumiCompliance:
