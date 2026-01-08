@@ -6,6 +6,7 @@ from typing import Optional
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from masumi.config import Config
 from masumi.payment import Payment
@@ -97,6 +98,15 @@ app = FastAPI(
     title="Debug Agent API - Masumi API Standard",
     description="Debug agent for testing Sokosumi platform error handling. Supports intentional failure injection at various stages. Masumi MIP-003 compliant.",
     version="1.0.0"
+)
+
+# Add CORS middleware to allow validation requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for validation
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -710,6 +720,7 @@ async def input_schema():
                 "id": "input_string",
                 "type": "string",
                 "name": "Task Description",
+                "required": True,
                 "data": {
                     "description": "The text input for the debug task",
                     "placeholder": "Enter your task description here"
@@ -718,7 +729,8 @@ async def input_schema():
             {
                 "id": "command",
                 "type": "string",
-                "name": "Debug Command (Optional)",
+                "name": "Debug Command",
+                "required": False,
                 "data": {
                     "description": "Debug command to execute (e.g., 'debug_test')",
                     "placeholder": "debug_test"
@@ -727,7 +739,8 @@ async def input_schema():
             {
                 "id": "failure_point",
                 "type": "string",
-                "name": "Failure Point (Optional)",
+                "name": "Failure Point",
+                "required": False,
                 "data": {
                     "description": "Point to inject failure: fail_on_start_job, fail_on_payment_creation, fail_on_task_execution, fail_on_payment_completion, fail_on_status_check, fail_on_hitl_approval, fail_on_hitl_timeout, fail_on_hitl_rejection",
                     "placeholder": "fail_on_start_job"
@@ -736,7 +749,8 @@ async def input_schema():
             {
                 "id": "failure_type",
                 "type": "string",
-                "name": "Failure Type (Optional)",
+                "name": "Failure Type",
+                "required": False,
                 "data": {
                     "description": "Type of failure: http_400, http_404, http_500, http_503, timeout, exception, invalid_response",
                     "placeholder": "http_500"
@@ -744,8 +758,9 @@ async def input_schema():
             },
             {
                 "id": "enable_hitl",
-                "type": "boolean",
-                "name": "Enable HITL (Optional)",
+                "type": "string",
+                "name": "Enable HITL",
+                "required": False,
                 "data": {
                     "description": "Enable Human-in-the-Loop approval workflow (true/false)",
                     "placeholder": "false"
@@ -754,7 +769,8 @@ async def input_schema():
             {
                 "id": "hitl_timeout",
                 "type": "number",
-                "name": "HITL Timeout (Optional)",
+                "name": "HITL Timeout",
+                "required": False,
                 "data": {
                     "description": "Timeout in seconds for HITL approval (default: 300)",
                     "placeholder": "300"
