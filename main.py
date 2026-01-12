@@ -2,20 +2,24 @@ import os
 import uvicorn
 import uuid
 import time
-from typing import Optional
+import json
+from typing import Optional, Any, Union
 from urllib.parse import urlparse
+from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 from masumi.config import Config
 from masumi.payment import Payment
 from agentic_service import get_agentic_service
 from failure_injector import FailureInjector, FailurePoint, FailureType
 from hitl_manager import HITLManager, ApprovalStatus
 from logging_config import setup_logging
+from request_logger import request_logger
 import cuid2
 import asyncio
 
@@ -115,19 +119,21 @@ app.add_middleware(
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle Pydantic validation errors with detailed logging"""
+    start_time = time.time()
+    
     logger.error("=" * 80)
     logger.error("VALIDATION_ERROR: Pydantic validation failed")
     logger.error(f"VALIDATION_ERROR: Request URL: {request.url}")
     logger.error(f"VALIDATION_ERROR: Request method: {request.method}")
     
     # Try to log the request body
+    body_str = None
     try:
         body = await request.body()
         body_str = body.decode('utf-8') if isinstance(body, bytes) else str(body)
         logger.error(f"VALIDATION_ERROR: Request body (raw): {body_str[:500]}")
     except Exception as e:
         logger.error(f"VALIDATION_ERROR: Could not read request body: {str(e)}")
-        body_str = None
     
     # Log validation errors
     errors = exc.errors()
@@ -135,12 +141,25 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     for idx, error in enumerate(errors):
         logger.error(f"VALIDATION_ERROR: Error [{idx}]: {error}")
     
+    # Log to request logger
+    duration_ms = (time.time() - start_time) * 1000
+    request_logger.log_request(
+        endpoint=str(request.url.path),
+        method=request.method,
+        request_body=body_str,
+        validation_errors=list(errors),  # Convert Sequence to List
+        error=f"Validation failed: {len(errors)} error(s)",
+        status_code=422,
+        duration_ms=duration_ms
+    )
+    
     # Return detailed error response
     return JSONResponse(
         status_code=422,
         content={
             "detail": errors,
-            "body": body_str[:500] if body_str else None
+            "body": body_str[:500] if body_str else None,
+            "message": f"Validation failed: {len(errors)} error(s). Check /logs endpoint for details."
         }
     )
 
@@ -174,7 +193,13 @@ hitl_manager = HITLManager()
 # ─────────────────────────────────────────────────────────────────────────────
 class InputDataItem(BaseModel):
     key: str
-    value: str | bool | int | float | None  # Accept multiple types, convert to string later
+    value: Any  # Accept any type to avoid validation errors
+    
+    @field_validator('value', mode='before')
+    @classmethod
+    def validate_value(cls, v):
+        # Accept any value type - don't validate, just pass through
+        return v
 
 class StartJobRequest(BaseModel):
     input_data: list[InputDataItem]
@@ -213,8 +238,18 @@ async def execute_agentic_task(input_data: dict) -> object:
 #region 1) Start Job (MIP-003: /start_job)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.post("/start_job")
-async def start_job(data: StartJobRequest):
+async def start_job(request: Request, data: StartJobRequest):
     """ Initiates a job and creates a payment request """
+    start_time = time.time()
+    request_body = None
+    
+    # Try to capture request body for logging
+    try:
+        body = await request.body()
+        request_body = body.decode('utf-8') if isinstance(body, bytes) else str(body)
+    except:
+        pass
+    
     logger.info("=" * 80)
     logger.info("START_JOB: Received request")
     logger.info(f"START_JOB: Request data type: {type(data)}")
@@ -414,15 +449,52 @@ async def start_job(data: StartJobRequest):
         logger.info(f"START_JOB: Response data prepared with keys: {list(response_data.keys())}")
         logger.info("START_JOB: Request completed successfully")
         logger.info("=" * 80)
+        
+        # Log successful request
+        duration_ms = (time.time() - start_time) * 1000
+        request_logger.log_request(
+            endpoint="/start_job",
+            method="POST",
+            request_data={"input_data": [{"key": item.key, "value": item.value} for item in data.input_data]},
+            request_body=request_body,
+            response_data=response_data,
+            status_code=200,
+            duration_ms=duration_ms
+        )
+        
         return response_data
     except HTTPException as e:
         # re-raise HTTP exceptions (our custom errors)
         logger.error(f"START_JOB: HTTPException raised - status_code: {e.status_code}, detail: {e.detail}")
         logger.info("=" * 80)
+        
+        # Log error
+        duration_ms = (time.time() - start_time) * 1000
+        request_logger.log_request(
+            endpoint="/start_job",
+            method="POST",
+            request_body=request_body,
+            error=f"HTTPException: {e.detail}",
+            status_code=e.status_code,
+            duration_ms=duration_ms
+        )
+        
         raise
     except ValueError as e:
         logger.error(f"START_JOB: ValueError in start_job: {str(e)}", exc_info=True)
         logger.info("=" * 80)
+        
+        # Log error
+        duration_ms = (time.time() - start_time) * 1000
+        request_logger.log_request(
+            endpoint="/start_job",
+            method="POST",
+            request_body=request_body,
+            error=f"ValueError: {str(e)}",
+            status_code=400,
+            duration_ms=duration_ms
+        )
+        
         if "PAYMENT_AMOUNT" in str(e):
             raise HTTPException(
                 status_code=500,
@@ -435,6 +507,18 @@ async def start_job(data: StartJobRequest):
     except KeyError as e:
         logger.error(f"START_JOB: KeyError - Missing required field in request: {str(e)}", exc_info=True)
         logger.info("=" * 80)
+        
+        # Log error
+        duration_ms = (time.time() - start_time) * 1000
+        request_logger.log_request(
+            endpoint="/start_job",
+            method="POST",
+            request_body=request_body,
+            error=f"KeyError: {str(e)}",
+            status_code=400,
+            duration_ms=duration_ms
+        )
+        
         raise HTTPException(
             status_code=400,
             detail=f"Missing required field: {str(e)}"
@@ -443,6 +527,17 @@ async def start_job(data: StartJobRequest):
         logger.error(f"START_JOB: Unexpected exception in start_job: {str(e)}", exc_info=True)
         logger.error(f"START_JOB: Exception type: {type(e).__name__}")
         logger.info("=" * 80)
+        
+        # Log error
+        duration_ms = (time.time() - start_time) * 1000
+        request_logger.log_request(
+            endpoint="/start_job",
+            method="POST",
+            request_body=request_body,
+            error=f"{type(e).__name__}: {str(e)}",
+            status_code=500,
+            duration_ms=duration_ms
+        )
         # check if it's a masumi payment service error
         if "Network error" in str(e) or "payment" in str(e).lower():
             raise HTTPException(
@@ -916,6 +1011,56 @@ async def health():
     return {
         "status": "healthy"
     }
+
+# ─────────────────────────────────────────────────────────────────────────────
+#region Debug Logging Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/logs")
+async def get_logs(
+    endpoint: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    status_code: Optional[int] = None
+):
+    """
+    Retrieve request logs for debugging.
+    
+    Query parameters:
+    - endpoint: Filter by endpoint (e.g., "/start_job")
+    - limit: Maximum number of logs to return (default: 100)
+    - offset: Number of logs to skip (default: 0)
+    - status_code: Filter by HTTP status code (e.g., 422)
+    
+    Returns:
+    - List of log entries with request/response details
+    """
+    logs_data = request_logger.get_logs(
+        endpoint=endpoint,
+        limit=limit,
+        offset=offset,
+        status_code=status_code
+    )
+    return logs_data
+
+@app.get("/logs/latest-error")
+async def get_latest_error():
+    """
+    Get the most recent error log entry.
+    Useful for quick debugging of the last failure.
+    """
+    error_log = request_logger.get_latest_error()
+    if error_log:
+        return error_log
+    return {"message": "No errors found in logs"}
+
+@app.delete("/logs")
+async def clear_logs():
+    """
+    Clear all request logs.
+    Use with caution - this cannot be undone.
+    """
+    request_logger.clear_logs()
+    return {"message": "All logs cleared successfully"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 #region Main Logic if Called as a Script
