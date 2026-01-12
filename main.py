@@ -388,8 +388,8 @@ async def start_job(request: Request, data: StartJobRequest):
             )
         
         # generate identifier_from_purchaser internally - must be a valid hex string
-        # Generate 32 bytes (64 hex characters) for a valid hex identifier
-        identifier_from_purchaser = secrets.token_hex(32)
+        # Payment service requires max 26 characters, so generate 13 bytes (26 hex characters)
+        identifier_from_purchaser = secrets.token_hex(13)
         logger.info(f"START_JOB: Generated identifier_from_purchaser: {identifier_from_purchaser}")
         
         # validate required input
