@@ -14,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError, field_validator, model_validator
 from masumi.config import Config
-from masumi.payment import Payment
+from masumi.payment import Payment, Amount
 from agentic_service import get_agentic_service
 from failure_injector import FailureInjector, FailurePoint, FailureType
 from hitl_manager import HITLManager, ApprovalStatus
@@ -408,11 +408,20 @@ async def start_job(request: Request, data: StartJobRequest):
         logger.info(f"START_JOB: Input text received: '{truncated_input}' (full length: {len(input_text)})")
         logger.info(f"START_JOB: Starting job {job_id} with agent {agent_identifier}")
 
-        # Define payment amounts
-        payment_amount = int(os.getenv("PAYMENT_AMOUNT", "1000000"))  # 1 ADA
+        # Define payment amounts - set to 0 for free/debug agent
+        payment_amount = int(os.getenv("PAYMENT_AMOUNT", "0"))  # Default to 0 (free)
         payment_unit = os.getenv("PAYMENT_UNIT", "lovelace") # Default lovelace
 
         logger.info(f"Using payment amount: {payment_amount} {payment_unit}")
+        
+        # Prepare amounts in the format expected by Masumi Payment service
+        # Fixed price format: list of Amount objects with unit and amount
+        amounts = [
+            Amount(
+                unit=payment_unit,
+                amount=payment_amount
+            )
+        ]
         
         # Check for failure on payment creation
         logger.info("START_JOB: Checking for failure injection at PAYMENT_CREATION point")
@@ -439,10 +448,10 @@ async def start_job(request: Request, data: StartJobRequest):
         
         # Create a payment request using Masumi
         logger.info("START_JOB: Creating Payment object")
-        logger.info(f"START_JOB: Payment params - agent_identifier: {agent_identifier}, network: {NETWORK}")
+        logger.info(f"START_JOB: Payment params - agent_identifier: {agent_identifier}, network: {NETWORK}, amounts: {amounts}")
         payment = Payment(
             agent_identifier=agent_identifier,
-            #amounts=amounts,
+            amounts=amounts,
             config=config,
             identifier_from_purchaser=identifier_from_purchaser,
             input_data=input_data_dict,
