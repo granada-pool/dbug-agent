@@ -464,6 +464,9 @@ async def start_job(request: Request, data: StartJobRequest):
             logger.info(f"START_JOB: Payment request created successfully. Response keys: {list(payment_request.keys()) if isinstance(payment_request, dict) else 'not a dict'}")
             if isinstance(payment_request, dict) and "data" in payment_request:
                 logger.info(f"START_JOB: Payment request data keys: {list(payment_request['data'].keys())}")
+                # Log all data fields for debugging
+                for key, value in payment_request["data"].items():
+                    logger.debug(f"START_JOB: Payment data[{key}] = {value} (type: {type(value).__name__})")
             payment_id = payment_request["data"]["blockchainIdentifier"]
             payment.payment_ids.add(payment_id)
             logger.info(f"START_JOB: Created payment request with ID: {payment_id}")
@@ -504,42 +507,64 @@ async def start_job(request: Request, data: StartJobRequest):
         logger.info("START_JOB: Preparing response data")
         
         # Parse timestamps from payment request
-        submit_result_time = payment_request["data"]["submitResultTime"]
-        unlock_time = payment_request["data"]["unlockTime"]
-        external_dispute_unlock_time = payment_request["data"]["externalDisputeUnlockTime"]
-        input_hash = payment_request["data"]["inputHash"]
+        payment_data = payment_request["data"]
+        submit_result_time = payment_data.get("submitResultTime")
+        unlock_time = payment_data.get("unlockTime")
+        external_dispute_unlock_time = payment_data.get("externalDisputeUnlockTime")
+        pay_by_time = payment_data.get("payByTime")  # Check if payment service provides this
+        input_hash = payment_data.get("inputHash")
         
-        # Convert ISO timestamp strings to Unix timestamps (milliseconds) for payByTime
-        # payByTime should be the submitResultTime as a number
-        try:
-            from datetime import datetime
-            if isinstance(submit_result_time, str):
-                # Parse ISO format timestamp and convert to Unix timestamp in milliseconds
-                dt = datetime.fromisoformat(submit_result_time.replace('Z', '+00:00'))
-                pay_by_time = int(dt.timestamp() * 1000)
-            else:
-                pay_by_time = int(submit_result_time)
-        except Exception as e:
-            logger.warning(f"START_JOB: Could not parse submitResultTime, using current time: {e}")
-            pay_by_time = int(time.time() * 1000)
+        # Convert ISO timestamp strings to Unix timestamps (seconds) for MIP-003 compliance
+        # MIP-003 requires all timestamps as int (Unix timestamp in seconds)
+        def parse_timestamp_to_unix(ts):
+            """Convert ISO timestamp string to Unix timestamp (seconds)"""
+            try:
+                if isinstance(ts, str):
+                    # Parse ISO format timestamp and convert to Unix timestamp in seconds
+                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    return int(dt.timestamp())
+                elif isinstance(ts, (int, float)):
+                    # If already a number, check if it's milliseconds or seconds
+                    if ts > 1e10:  # Likely milliseconds (timestamp > year 2001 in seconds)
+                        return int(ts / 1000)
+                    return int(ts)  # Already seconds
+                return int(time.time())
+            except Exception as e:
+                logger.warning(f"START_JOB: Could not parse timestamp {ts}, using current time: {e}")
+                return int(time.time())
         
+        submit_result_time_unix = parse_timestamp_to_unix(submit_result_time) if submit_result_time else int(time.time())
+        unlock_time_unix = parse_timestamp_to_unix(unlock_time) if unlock_time else int(time.time())
+        external_dispute_unlock_time_unix = parse_timestamp_to_unix(external_dispute_unlock_time) if external_dispute_unlock_time else int(time.time())
+        
+        # Use payByTime from payment service if available, otherwise use submitResultTime
+        if pay_by_time:
+            pay_by_time_unix = parse_timestamp_to_unix(pay_by_time)
+        else:
+            # Fallback: use submitResultTime as payByTime (payment deadline)
+            pay_by_time_unix = submit_result_time_unix
+            logger.info("START_JOB: payByTime not in payment response, using submitResultTime")
+        
+        # MIP-003 compliant response format
         response_data = {
-            # Original fields for backward compatibility
+            # MIP-003 required fields
+            "id": job_id,  # MIP-003 uses "id" not "job_id"
+            "blockchainIdentifier": payment_id,
+            "payByTime": pay_by_time_unix,  # int (Unix timestamp in seconds)
+            "submitResultTime": submit_result_time_unix,  # int (Unix timestamp in seconds)
+            "unlockTime": unlock_time_unix,  # int (Unix timestamp in seconds)
+            "externalDisputeUnlockTime": external_dispute_unlock_time_unix,  # int (Unix timestamp in seconds)
+            "agentIdentifier": agent_identifier,
+            "sellerVKey": seller_vkey,
+            "identifierFromPurchaser": identifier_from_purchaser,
+            "input_hash": input_hash,
+            
+            # Additional fields for backward compatibility and Sokosumi
             "job_id": job_id,
             "payment_id": payment_id,
-            # Extended fields for /purchase endpoint
-            "identifierFromPurchaser": identifier_from_purchaser,
             "network": NETWORK,
-            "sellerVKey": seller_vkey,  # Capital V as expected by Sokosumi
             "paymentType": "Web3CardanoV1",
-            "blockchainIdentifier": payment_id,
-            "submitResultTime": str(submit_result_time),
-            "unlockTime": str(unlock_time),
-            "externalDisputeUnlockTime": str(external_dispute_unlock_time),
-            "agentIdentifier": agent_identifier,
-            "inputHash": input_hash,  # camelCase version
-            "input_hash": input_hash,  # snake_case version for Sokosumi
-            "payByTime": pay_by_time  # Number (Unix timestamp in milliseconds)
+            "inputHash": input_hash  # camelCase version for compatibility
         }
         logger.info(f"START_JOB: Response data prepared with keys: {list(response_data.keys())}")
         logger.info("START_JOB: Request completed successfully")
@@ -878,13 +903,28 @@ async def get_status(job_id: str):
 
     result_data = job.get("result")
     result = result_data.raw if result_data and hasattr(result_data, "raw") else None
-
-    return {
-        "job_id": job_id,
-        "status": job["status"],
-        "payment_status": job["payment_status"],
-        "result": result
+    
+    # MIP-003 compliant status response
+    status_response = {
+        "id": job_id,  # MIP-003 uses "id" not "job_id"
+        "status": job["status"]
     }
+    
+    # Add result if job is completed
+    if job["status"] == "completed" and result:
+        status_response["result"] = result
+    
+    # Add input_required if job is awaiting input (MIP-003 requirement)
+    if job["status"] == "awaiting_input":
+        status_response["input_required"] = True
+    
+    # Add additional fields for backward compatibility
+    status_response["job_id"] = job_id
+    status_response["payment_status"] = job.get("payment_status", "unknown")
+    if result and "result" not in status_response:
+        status_response["result"] = result
+    
+    return status_response
 
 # ─────────────────────────────────────────────────────────────────────────────
 #region HITL Approval Endpoint
@@ -999,9 +1039,10 @@ async def check_availability():
     current_time = time.time()
     uptime_seconds = int(current_time - server_start_time)
     
+    # MIP-003 compliant availability response
     return {
-        "status": "available", 
-        "uptime": uptime_seconds,
+        "status": "available",
+        "type": "masumi-agent",  # MIP-003 requires "type" field
         "message": "Debug Agent - Server operational. Use input_data with debug commands to test failures."
     }
 
