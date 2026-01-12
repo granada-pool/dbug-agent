@@ -408,8 +408,8 @@ async def start_job(request: Request, data: StartJobRequest):
         logger.info(f"START_JOB: Input text received: '{truncated_input}' (full length: {len(input_text)})")
         logger.info(f"START_JOB: Starting job {job_id} with agent {agent_identifier}")
 
-        # Define payment amounts - set to 0 for free/debug agent
-        payment_amount = int(os.getenv("PAYMENT_AMOUNT", "0"))  # Default to 0 (free)
+        # Define payment amounts - set to 1
+        payment_amount = int(os.getenv("PAYMENT_AMOUNT", "100000"))  # Default to 1 ADA
         payment_unit = os.getenv("PAYMENT_UNIT", "lovelace") # Default lovelace
 
         logger.info(f"Using payment amount: {payment_amount} {payment_unit}")
@@ -502,6 +502,27 @@ async def start_job(request: Request, data: StartJobRequest):
         # Return the response in the format expected by the /purchase endpoint
         # Include both the original fields and the extended fields
         logger.info("START_JOB: Preparing response data")
+        
+        # Parse timestamps from payment request
+        submit_result_time = payment_request["data"]["submitResultTime"]
+        unlock_time = payment_request["data"]["unlockTime"]
+        external_dispute_unlock_time = payment_request["data"]["externalDisputeUnlockTime"]
+        input_hash = payment_request["data"]["inputHash"]
+        
+        # Convert ISO timestamp strings to Unix timestamps (milliseconds) for payByTime
+        # payByTime should be the submitResultTime as a number
+        try:
+            from datetime import datetime
+            if isinstance(submit_result_time, str):
+                # Parse ISO format timestamp and convert to Unix timestamp in milliseconds
+                dt = datetime.fromisoformat(submit_result_time.replace('Z', '+00:00'))
+                pay_by_time = int(dt.timestamp() * 1000)
+            else:
+                pay_by_time = int(submit_result_time)
+        except Exception as e:
+            logger.warning(f"START_JOB: Could not parse submitResultTime, using current time: {e}")
+            pay_by_time = int(time.time() * 1000)
+        
         response_data = {
             # Original fields for backward compatibility
             "job_id": job_id,
@@ -509,14 +530,16 @@ async def start_job(request: Request, data: StartJobRequest):
             # Extended fields for /purchase endpoint
             "identifierFromPurchaser": identifier_from_purchaser,
             "network": NETWORK,
-            "sellerVkey": seller_vkey,
+            "sellerVKey": seller_vkey,  # Capital V as expected by Sokosumi
             "paymentType": "Web3CardanoV1",
             "blockchainIdentifier": payment_id,
-            "submitResultTime": str(payment_request["data"]["submitResultTime"]),
-            "unlockTime": str(payment_request["data"]["unlockTime"]),
-            "externalDisputeUnlockTime": str(payment_request["data"]["externalDisputeUnlockTime"]),
+            "submitResultTime": str(submit_result_time),
+            "unlockTime": str(unlock_time),
+            "externalDisputeUnlockTime": str(external_dispute_unlock_time),
             "agentIdentifier": agent_identifier,
-            "inputHash": payment_request["data"]["inputHash"]
+            "inputHash": input_hash,  # camelCase version
+            "input_hash": input_hash,  # snake_case version for Sokosumi
+            "payByTime": pay_by_time  # Number (Unix timestamp in milliseconds)
         }
         logger.info(f"START_JOB: Response data prepared with keys: {list(response_data.keys())}")
         logger.info("START_JOB: Request completed successfully")
