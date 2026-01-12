@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ValidationError, field_validator, model_validator
 from masumi.config import Config
 from masumi.payment import Payment
 from agentic_service import get_agentic_service
@@ -202,24 +202,28 @@ class InputDataItem(BaseModel):
         return v
 
 class StartJobRequest(BaseModel):
-    input_data: Any  # Accept any format (list or dict) and normalize in validator
+    input_data: list[InputDataItem]  # Must be a list of InputDataItem
     
-    @field_validator('input_data', mode='before')
+    @model_validator(mode='before')
     @classmethod
-    def normalize_input_data(cls, v):
+    def normalize_input_data(cls, data):
         """Normalize input_data from different formats to our internal format"""
-        # If it's a dict (Sokosumi format), convert to list format
-        if isinstance(v, dict):
-            # Convert dict format to list of InputDataItem
-            result = []
-            for key, value in v.items():
-                result.append({"key": key, "value": value})
-            return result
-        # If it's already a list, return as-is
-        if isinstance(v, list):
-            return v
-        # Fallback: wrap in list
-        return [{"key": "input_string", "value": str(v)}]
+        if isinstance(data, dict) and 'input_data' in data:
+            input_data_value = data['input_data']
+            # If it's a dict (Sokosumi format), convert to list format
+            if isinstance(input_data_value, dict):
+                # Convert dict format to list of dicts (Pydantic will validate to InputDataItem)
+                result = []
+                for key, value in input_data_value.items():
+                    result.append({"key": key, "value": value})
+                data['input_data'] = result
+            # If it's already a list, keep it as-is
+            elif isinstance(input_data_value, list):
+                pass  # Already in correct format
+            else:
+                # Fallback: wrap in list
+                data['input_data'] = [{"key": "input_string", "value": str(input_data_value)}]
+        return data
     
     class Config:
         json_schema_extra = {
