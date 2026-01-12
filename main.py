@@ -5,9 +5,11 @@ import time
 from typing import Optional
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ValidationError
 from masumi.config import Config
 from masumi.payment import Payment
 from agentic_service import get_agentic_service
@@ -109,6 +111,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add exception handler for Pydantic validation errors (422)
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle Pydantic validation errors with detailed logging"""
+    logger.error("=" * 80)
+    logger.error("VALIDATION_ERROR: Pydantic validation failed")
+    logger.error(f"VALIDATION_ERROR: Request URL: {request.url}")
+    logger.error(f"VALIDATION_ERROR: Request method: {request.method}")
+    
+    # Try to log the request body
+    try:
+        body = await request.body()
+        body_str = body.decode('utf-8') if isinstance(body, bytes) else str(body)
+        logger.error(f"VALIDATION_ERROR: Request body (raw): {body_str[:500]}")
+    except Exception as e:
+        logger.error(f"VALIDATION_ERROR: Could not read request body: {str(e)}")
+        body_str = None
+    
+    # Log validation errors
+    errors = exc.errors()
+    logger.error(f"VALIDATION_ERROR: Number of validation errors: {len(errors)}")
+    for idx, error in enumerate(errors):
+        logger.error(f"VALIDATION_ERROR: Error [{idx}]: {error}")
+    
+    # Return detailed error response
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": errors,
+            "body": body_str[:500] if body_str else None
+        }
+    )
+
 # ─────────────────────────────────────────────────────────────────────────────
 #region Temporary in-memory job store 
 # DO NOT USE IN PRODUCTION)
@@ -139,7 +174,7 @@ hitl_manager = HITLManager()
 # ─────────────────────────────────────────────────────────────────────────────
 class InputDataItem(BaseModel):
     key: str
-    value: str
+    value: str | bool | int | float | None  # Accept multiple types, convert to string later
 
 class StartJobRequest(BaseModel):
     input_data: list[InputDataItem]
@@ -180,28 +215,55 @@ async def execute_agentic_task(input_data: dict) -> object:
 @app.post("/start_job")
 async def start_job(data: StartJobRequest):
     """ Initiates a job and creates a payment request """
-    print(f"Received data: {data}")
-    print(f"Received data.input_data: {data.input_data}")
+    logger.info("=" * 80)
+    logger.info("START_JOB: Received request")
+    logger.info(f"START_JOB: Request data type: {type(data)}")
+    logger.info(f"START_JOB: Input data items count: {len(data.input_data) if data.input_data else 0}")
+    
+    # Log each input item with its type
+    for idx, item in enumerate(data.input_data):
+        logger.info(f"START_JOB: Input item [{idx}]: key='{item.key}', value={item.value}, value_type={type(item.value).__name__}")
+    
     try:
         # convert input_data array to dict for internal processing (early conversion for failure injection)
-        input_data_dict = {item.key: item.value for item in data.input_data}
+        # Handle different value types from Sokosumi (strings, booleans, numbers)
+        logger.info("START_JOB: Converting input_data array to dictionary")
+        input_data_dict = {}
+        for item in data.input_data:
+            # Preserve original types - don't convert everything to string
+            # This allows proper handling of booleans and numbers later
+            if item.value is None:
+                input_data_dict[item.key] = ""
+                logger.debug(f"START_JOB: Set {item.key} to empty string (was None)")
+            else:
+                input_data_dict[item.key] = item.value
+                logger.debug(f"START_JOB: Set {item.key} = {item.value} (type: {type(item.value).__name__})")
+        
+        logger.info(f"START_JOB: Converted input_data_dict keys: {list(input_data_dict.keys())}")
         
         # Check for failure injection at start_job (before job creation)
+        logger.info("START_JOB: Checking for failure injection at START_JOB point")
         failure_type = failure_injector.should_fail(
             FailurePoint.START_JOB, 
             input_data_dict
         )
         if failure_type:
+            logger.warning(f"START_JOB: Failure injection triggered: {failure_type}")
             failure_injector.inject_failure(
                 FailurePoint.START_JOB, 
                 failure_type,
                 "Debug: Intentional failure on start_job"
             )
+        else:
+            logger.info("START_JOB: No failure injection at START_JOB point")
         
         job_id = str(uuid.uuid4())
+        logger.info(f"START_JOB: Generated job_id: {job_id}")
         
         # validate required environment variables
+        logger.info("START_JOB: Validating environment variables")
         agent_identifier = os.getenv("AGENT_IDENTIFIER", "").strip()
+        logger.info(f"START_JOB: AGENT_IDENTIFIER = '{agent_identifier[:20]}...' (length: {len(agent_identifier)})" if len(agent_identifier) > 20 else f"START_JOB: AGENT_IDENTIFIER = '{agent_identifier}'")
         if not agent_identifier or agent_identifier == "REPLACE":
             logger.error("AGENT_IDENTIFIER environment variable is missing or set to placeholder 'REPLACE'")
             raise HTTPException(
@@ -210,16 +272,19 @@ async def start_job(data: StartJobRequest):
             )
         
         # validate payment service URL format
+        logger.info(f"START_JOB: PAYMENT_SERVICE_URL = '{PAYMENT_SERVICE_URL[:50]}...' (length: {len(PAYMENT_SERVICE_URL)})" if len(PAYMENT_SERVICE_URL) > 50 else f"START_JOB: PAYMENT_SERVICE_URL = '{PAYMENT_SERVICE_URL}'")
         url_error = validate_url(PAYMENT_SERVICE_URL, "PAYMENT_SERVICE_URL")
         if url_error:
-            logger.error(f"PAYMENT_SERVICE_URL validation failed: {url_error}")
+            logger.error(f"START_JOB: PAYMENT_SERVICE_URL validation failed: {url_error}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Server configuration error: {url_error}. Please contact administrator."
             )
+        logger.info("START_JOB: PAYMENT_SERVICE_URL validation passed")
             
+        logger.info(f"START_JOB: PAYMENT_API_KEY present: {bool(PAYMENT_API_KEY)}")
         if not PAYMENT_API_KEY:
-            logger.error("PAYMENT_API_KEY environment variable is missing")
+            logger.error("START_JOB: PAYMENT_API_KEY environment variable is missing")
             raise HTTPException(
                 status_code=500,
                 detail="Server configuration error: PAYMENT_API_KEY not configured. Please contact administrator."
@@ -227,11 +292,13 @@ async def start_job(data: StartJobRequest):
         
         # generate identifier_from_purchaser internally using cuid2
         identifier_from_purchaser = cuid2.Cuid().generate()
-        logger.info(f"Generated identifier_from_purchaser: {identifier_from_purchaser}")
+        logger.info(f"START_JOB: Generated identifier_from_purchaser: {identifier_from_purchaser}")
         
         # validate required input
+        logger.info(f"START_JOB: Checking for required 'input_string' field in input_data_dict")
+        logger.info(f"START_JOB: Available keys in input_data_dict: {list(input_data_dict.keys())}")
         if "input_string" not in input_data_dict:
-            logger.error("Required field 'input_string' missing from input_data")
+            logger.error(f"START_JOB: Required field 'input_string' missing from input_data. Available keys: {list(input_data_dict.keys())}")
             raise HTTPException(
                 status_code=400,
                 detail="Bad Request: 'input_string' is required in input_data array"
@@ -240,8 +307,8 @@ async def start_job(data: StartJobRequest):
         # Log the input text (truncate if too long)
         input_text = input_data_dict.get("input_string", "")
         truncated_input = input_text[:100] + "..." if len(input_text) > 100 else input_text
-        logger.info(f"Received job request with input: '{truncated_input}'")
-        logger.info(f"Starting job {job_id} with agent {agent_identifier}")
+        logger.info(f"START_JOB: Input text received: '{truncated_input}' (full length: {len(input_text)})")
+        logger.info(f"START_JOB: Starting job {job_id} with agent {agent_identifier}")
 
         # Define payment amounts
         payment_amount = int(os.getenv("PAYMENT_AMOUNT", "1000000"))  # 1 ADA
@@ -250,24 +317,31 @@ async def start_job(data: StartJobRequest):
         logger.info(f"Using payment amount: {payment_amount} {payment_unit}")
         
         # Check for failure on payment creation
+        logger.info("START_JOB: Checking for failure injection at PAYMENT_CREATION point")
         failure_type = failure_injector.should_fail(
             FailurePoint.PAYMENT_CREATION,
             input_data_dict
         )
         if failure_type:
+            logger.warning(f"START_JOB: Failure injection triggered at PAYMENT_CREATION: {failure_type}")
             failure_injector.inject_failure(
                 FailurePoint.PAYMENT_CREATION,
                 failure_type,
                 "Debug: Intentional failure on payment creation"
             )
+        else:
+            logger.info("START_JOB: No failure injection at PAYMENT_CREATION point")
         
         # create config after validation
+        logger.info("START_JOB: Creating Masumi Config object")
         config = Config(
             payment_service_url=PAYMENT_SERVICE_URL,
             payment_api_key=PAYMENT_API_KEY
         )
         
         # Create a payment request using Masumi
+        logger.info("START_JOB: Creating Payment object")
+        logger.info(f"START_JOB: Payment params - agent_identifier: {agent_identifier}, network: {NETWORK}")
         payment = Payment(
             agent_identifier=agent_identifier,
             #amounts=amounts,
@@ -277,11 +351,18 @@ async def start_job(data: StartJobRequest):
             network=NETWORK
         )
         
-        logger.info("Creating payment request...")
-        payment_request = await payment.create_payment_request()
-        payment_id = payment_request["data"]["blockchainIdentifier"]
-        payment.payment_ids.add(payment_id)
-        logger.info(f"Created payment request with ID: {payment_id}")
+        logger.info("START_JOB: Calling payment.create_payment_request()...")
+        try:
+            payment_request = await payment.create_payment_request()
+            logger.info(f"START_JOB: Payment request created successfully. Response keys: {list(payment_request.keys()) if isinstance(payment_request, dict) else 'not a dict'}")
+            if isinstance(payment_request, dict) and "data" in payment_request:
+                logger.info(f"START_JOB: Payment request data keys: {list(payment_request['data'].keys())}")
+            payment_id = payment_request["data"]["blockchainIdentifier"]
+            payment.payment_ids.add(payment_id)
+            logger.info(f"START_JOB: Created payment request with ID: {payment_id}")
+        except Exception as e:
+            logger.error(f"START_JOB: Error creating payment request: {str(e)}", exc_info=True)
+            raise
 
         # Store job info (Awaiting payment)
         jobs[job_id] = {
@@ -303,8 +384,9 @@ async def start_job(data: StartJobRequest):
 
         # Get SELLER_VKEY from environment
         seller_vkey = os.getenv("SELLER_VKEY", "")
+        logger.info(f"START_JOB: SELLER_VKEY present: {bool(seller_vkey)}")
         if not seller_vkey:
-            logger.error("SELLER_VKEY environment variable is missing")
+            logger.error("START_JOB: SELLER_VKEY environment variable is missing")
             raise HTTPException(
                 status_code=500,
                 detail="Server configuration error: SELLER_VKEY not configured. Please contact administrator."
@@ -312,7 +394,8 @@ async def start_job(data: StartJobRequest):
         
         # Return the response in the format expected by the /purchase endpoint
         # Include both the original fields and the extended fields
-        return {
+        logger.info("START_JOB: Preparing response data")
+        response_data = {
             # Original fields for backward compatibility
             "job_id": job_id,
             "payment_id": payment_id,
@@ -328,11 +411,18 @@ async def start_job(data: StartJobRequest):
             "agentIdentifier": agent_identifier,
             "inputHash": payment_request["data"]["inputHash"]
         }
-    except HTTPException:
+        logger.info(f"START_JOB: Response data prepared with keys: {list(response_data.keys())}")
+        logger.info("START_JOB: Request completed successfully")
+        logger.info("=" * 80)
+        return response_data
+    except HTTPException as e:
         # re-raise HTTP exceptions (our custom errors)
+        logger.error(f"START_JOB: HTTPException raised - status_code: {e.status_code}, detail: {e.detail}")
+        logger.info("=" * 80)
         raise
     except ValueError as e:
-        logger.error(f"Value error in start_job: {str(e)}", exc_info=True)
+        logger.error(f"START_JOB: ValueError in start_job: {str(e)}", exc_info=True)
+        logger.info("=" * 80)
         if "PAYMENT_AMOUNT" in str(e):
             raise HTTPException(
                 status_code=500,
@@ -343,13 +433,16 @@ async def start_job(data: StartJobRequest):
             detail=f"Invalid input data: {str(e)}"
         )
     except KeyError as e:
-        logger.error(f"Missing required field in request: {str(e)}", exc_info=True)
+        logger.error(f"START_JOB: KeyError - Missing required field in request: {str(e)}", exc_info=True)
+        logger.info("=" * 80)
         raise HTTPException(
             status_code=400,
             detail=f"Missing required field: {str(e)}"
         )
     except Exception as e:
-        logger.error(f"Unexpected error in start_job: {str(e)}", exc_info=True)
+        logger.error(f"START_JOB: Unexpected exception in start_job: {str(e)}", exc_info=True)
+        logger.error(f"START_JOB: Exception type: {type(e).__name__}")
+        logger.info("=" * 80)
         # check if it's a masumi payment service error
         if "Network error" in str(e) or "payment" in str(e).lower():
             raise HTTPException(
