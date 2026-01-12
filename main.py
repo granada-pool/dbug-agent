@@ -21,6 +21,7 @@ from hitl_manager import HITLManager, ApprovalStatus
 from logging_config import setup_logging
 from request_logger import request_logger
 import cuid2
+import secrets
 import asyncio
 
 #region congif
@@ -386,8 +387,9 @@ async def start_job(request: Request, data: StartJobRequest):
                 detail="Server configuration error: PAYMENT_API_KEY not configured. Please contact administrator."
             )
         
-        # generate identifier_from_purchaser internally using cuid2
-        identifier_from_purchaser = cuid2.Cuid().generate()
+        # generate identifier_from_purchaser internally - must be a valid hex string
+        # Generate 32 bytes (64 hex characters) for a valid hex identifier
+        identifier_from_purchaser = secrets.token_hex(32)
         logger.info(f"START_JOB: Generated identifier_from_purchaser: {identifier_from_purchaser}")
         
         # validate required input
