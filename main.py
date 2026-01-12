@@ -387,8 +387,26 @@ async def handle_payment_status(job_id: str, payment_id: str) -> None:
             )
         
         # HITL: Check if HITL is enabled for this job
-        enable_hitl = input_data.get("enable_hitl", "false").lower() == "true"
-        hitl_timeout = int(input_data.get("hitl_timeout", "300"))  # Default 5 minutes
+        # Handle both string and boolean values for enable_hitl
+        enable_hitl_value = input_data.get("enable_hitl", "false")
+        if isinstance(enable_hitl_value, bool):
+            enable_hitl = enable_hitl_value
+        elif isinstance(enable_hitl_value, str):
+            enable_hitl = enable_hitl_value.lower() == "true"
+        else:
+            enable_hitl = False
+        
+        # Handle hitl_timeout - convert to int if string
+        hitl_timeout_value = input_data.get("hitl_timeout", "300")
+        if isinstance(hitl_timeout_value, str):
+            try:
+                hitl_timeout = int(hitl_timeout_value)
+            except ValueError:
+                hitl_timeout = 300  # Default 5 minutes
+        elif isinstance(hitl_timeout_value, (int, float)):
+            hitl_timeout = int(hitl_timeout_value)
+        else:
+            hitl_timeout = 300  # Default 5 minutes
         
         if enable_hitl:
             logger.info(f"HITL enabled for job {job_id}, requesting approval...")
@@ -720,7 +738,6 @@ async def input_schema():
                 "id": "input_string",
                 "type": "string",
                 "name": "Task Description",
-                "required": True,
                 "data": {
                     "description": "The text input for the debug task",
                     "placeholder": "Enter your task description here"
@@ -729,11 +746,11 @@ async def input_schema():
             {
                 "id": "failure_point",
                 "type": "option",
-                "name": "Failure Point (Optional)",
-                "required": False,
+                "name": "Failure Point (optional)",
                 "data": {
-                    "description": "Point to inject failure during execution. If not provided, execution proceeds normally.",
+                    "description": "Point to inject failure during execution. Use 'none' to explicitly disable failure injection. If not provided, execution proceeds normally.",
                     "values": [
+                        "none",
                         "fail_on_start_job",
                         "fail_on_payment_creation",
                         "fail_on_payment_monitoring",
@@ -755,11 +772,11 @@ async def input_schema():
             {
                 "id": "failure_type",
                 "type": "option",
-                "name": "Failure Type (Optional)",
-                "required": False,
+                "name": "Failure Type (optional)",
                 "data": {
-                    "description": "Type of failure to inject. Required if failure_point is specified.",
+                    "description": "Type of failure to inject. Required if failure_point is specified (use 'none' to disable).",
                     "values": [
+                        "none",
                         "http_400",
                         "http_404",
                         "http_500",
@@ -777,8 +794,7 @@ async def input_schema():
             {
                 "id": "enable_hitl",
                 "type": "boolean",
-                "name": "Enable HITL (Optional)",
-                "required": False,
+                "name": "Enable HITL (optional)",
                 "data": {
                     "description": "Enable Human-in-the-Loop approval workflow. If not enabled, execution proceeds automatically.",
                     "placeholder": "false"
@@ -787,8 +803,7 @@ async def input_schema():
             {
                 "id": "hitl_timeout",
                 "type": "number",
-                "name": "HITL Timeout (Optional)",
-                "required": False,
+                "name": "HITL Timeout (optional)",
                 "data": {
                     "description": "Timeout in seconds for HITL approval (default: 300). Only used if HITL is enabled.",
                     "placeholder": "300"

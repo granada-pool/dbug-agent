@@ -50,8 +50,8 @@ class FailureInjector:
     def parse_command(self, input_data: Dict[str, Any]) -> Optional[Dict[str, str]]:
         """
         Parse failure injection configuration from input_data.
-        Returns failure config if failure_point is present, None otherwise.
-        If no failure configuration is provided, execution proceeds normally.
+        Returns failure config if failure_point is present and not "none", None otherwise.
+        If failure_point is "none" or not provided, execution proceeds normally.
         """
         if not isinstance(input_data, dict):
             return None
@@ -59,6 +59,14 @@ class FailureInjector:
         # Check for failure_point - if present, we have a failure injection request
         failure_point = input_data.get("failure_point", "")
         failure_type = input_data.get("failure_type", "exception")
+        
+        # Explicit "none" means no failure injection
+        if failure_point and failure_point.lower() == "none":
+            return None
+        
+        # If failure_type is "none" but failure_point is set, treat as no failure
+        if failure_type and failure_type.lower() == "none":
+            return None
         
         if failure_point:
             return {
@@ -73,6 +81,9 @@ class FailureInjector:
             if len(parts) >= 2:
                 failure_point = parts[1].strip()
                 failure_type = parts[2].strip() if len(parts) > 2 else "exception"
+                # Check for "none" in legacy format too
+                if failure_point.lower() == "none" or failure_type.lower() == "none":
+                    return None
                 return {
                     "failure_point": failure_point,
                     "failure_type": failure_type
@@ -84,6 +95,7 @@ class FailureInjector:
         """
         Check if a failure should be injected at the given point.
         Returns FailureType if failure should occur, None otherwise.
+        Respects "none" flag to explicitly disable failure injection.
         """
         command_config = self.parse_command(input_data)
         
@@ -92,6 +104,10 @@ class FailureInjector:
         
         requested_point = command_config.get("failure_point", "")
         requested_type = command_config.get("failure_type", "exception")
+        
+        # Double-check for "none" (shouldn't happen if parse_command works correctly, but be safe)
+        if requested_point.lower() == "none" or requested_type.lower() == "none":
+            return None
         
         # Check if this is the point where we should fail
         if failure_point.value == requested_point or requested_point in failure_point.value:
