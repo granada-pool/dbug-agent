@@ -95,7 +95,7 @@ class AgenticService:
         # Validate that we have some input
         if not text_input or not text_input.strip():
             error_msg = "No valid input text provided. Provide 'input_string' or 'text' in input_data."
-        if self.logger:
+            if self.logger:
                 self.logger.error(error_msg)
             raise ValueError(error_msg)
         
