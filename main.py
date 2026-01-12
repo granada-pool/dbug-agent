@@ -202,7 +202,24 @@ class InputDataItem(BaseModel):
         return v
 
 class StartJobRequest(BaseModel):
-    input_data: list[InputDataItem]
+    input_data: Any  # Accept any format (list or dict) and normalize in validator
+    
+    @field_validator('input_data', mode='before')
+    @classmethod
+    def normalize_input_data(cls, v):
+        """Normalize input_data from different formats to our internal format"""
+        # If it's a dict (Sokosumi format), convert to list format
+        if isinstance(v, dict):
+            # Convert dict format to list of InputDataItem
+            result = []
+            for key, value in v.items():
+                result.append({"key": key, "value": value})
+            return result
+        # If it's already a list, return as-is
+        if isinstance(v, list):
+            return v
+        # Fallback: wrap in list
+        return [{"key": "input_string", "value": str(v)}]
     
     class Config:
         json_schema_extra = {
@@ -261,20 +278,60 @@ async def start_job(request: Request, data: StartJobRequest):
     
     try:
         # convert input_data array to dict for internal processing (early conversion for failure injection)
-        # Handle different value types from Sokosumi (strings, booleans, numbers)
+        # Handle different value types from Sokosumi (strings, booleans, numbers, arrays)
         logger.info("START_JOB: Converting input_data array to dictionary")
         input_data_dict = {}
         for item in data.input_data:
+            # Handle array values (e.g., failure_point: [0] means first option index)
+            value = item.value
+            if isinstance(value, list):
+                # If it's a list with one element, extract it (Sokosumi sends option indices as [0])
+                if len(value) == 1:
+                    idx = value[0]
+                    # If it's an index (number), map it to the actual option value
+                    if isinstance(idx, int):
+                        # Map index to option value based on the field
+                        if item.key == "failure_point":
+                            # Index 0 = "none", index 1 = "fail_on_start_job", etc.
+                            failure_points = ["none", "fail_on_start_job", "fail_on_payment_creation", 
+                                            "fail_on_payment_monitoring", "fail_on_task_execution",
+                                            "fail_on_payment_completion", "fail_on_status_check",
+                                            "fail_on_availability", "fail_on_input_schema",
+                                            "fail_on_hitl_approval", "fail_on_hitl_timeout", "fail_on_hitl_rejection"]
+                            if 0 <= idx < len(failure_points):
+                                value = failure_points[idx]
+                                logger.info(f"START_JOB: Mapped failure_point index {idx} to '{value}'")
+                            else:
+                                value = "none"  # Default to none if invalid index
+                        elif item.key == "failure_type":
+                            # Index 0 = "none", index 1 = "http_400", etc.
+                            failure_types = ["none", "http_400", "http_404", "http_500", "http_503",
+                                           "timeout", "exception", "invalid_response"]
+                            if 0 <= idx < len(failure_types):
+                                value = failure_types[idx]
+                                logger.info(f"START_JOB: Mapped failure_type index {idx} to '{value}'")
+                            else:
+                                value = "none"  # Default to none if invalid index
+                        else:
+                            value = idx  # For other fields, just use the index value
+                    else:
+                        value = idx
+                elif len(value) == 0:
+                    value = None
+                # If multiple values, take the first one
+                else:
+                    value = value[0]
+            
             # Preserve original types - don't convert everything to string
             # This allows proper handling of booleans and numbers later
-            if item.value is None:
+            if value is None:
                 input_data_dict[item.key] = ""
                 logger.debug(f"START_JOB: Set {item.key} to empty string (was None)")
             else:
-                input_data_dict[item.key] = item.value
-                logger.debug(f"START_JOB: Set {item.key} = {item.value} (type: {type(item.value).__name__})")
+                input_data_dict[item.key] = value
+                logger.debug(f"START_JOB: Set {item.key} = {value} (type: {type(value).__name__})")
         
-        logger.info(f"START_JOB: Converted input_data_dict keys: {list(input_data_dict.keys())}")
+        logger.info(f"START_JOB: Converted input_data_dict: {input_data_dict}")
         
         # Check for failure injection at start_job (before job creation)
         logger.info("START_JOB: Checking for failure injection at START_JOB point")
