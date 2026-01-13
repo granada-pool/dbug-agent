@@ -487,10 +487,33 @@ async def start_job(request: Request, data: StartJobRequest):
         async def payment_callback(payment_id: str):
             await handle_payment_status(job_id, payment_id)
 
-        # Start monitoring the payment status
+        async def monitor_payment_with_error_handling():
+            """Wrapper to monitor payment with proper error handling"""
+            try:
+                logger.info(f"PAYMENT_MONITOR: Starting payment monitoring for job {job_id}")
+                await payment.start_status_monitoring(payment_callback)
+                logger.info(f"PAYMENT_MONITOR: Payment monitoring completed for job {job_id}")
+            except Exception as e:
+                logger.error(f"PAYMENT_MONITOR: Error in payment monitoring for job {job_id}: {str(e)}", exc_info=True)
+                # Update job status to failed if monitoring fails
+                if job_id in jobs:
+                    jobs[job_id]["status"] = "failed"
+                    jobs[job_id]["error"] = f"Payment monitoring error: {str(e)}"
+                # Clean up payment instance
+                if job_id in payment_instances:
+                    try:
+                        payment_instances[job_id].stop_status_monitoring()
+                    except:
+                        pass
+                    del payment_instances[job_id]
+
+        # Start monitoring the payment status in the background
+        # This must run in background so /start_job can return immediately
         payment_instances[job_id] = payment
-        logger.info(f"Starting payment status monitoring for job {job_id}")
-        await payment.start_status_monitoring(payment_callback)
+        logger.info(f"START_JOB: Starting payment status monitoring for job {job_id} in background")
+        # Use create_task to run monitoring in background without blocking the response
+        monitoring_task = asyncio.create_task(monitor_payment_with_error_handling())
+        logger.info(f"START_JOB: Payment monitoring task created for job {job_id}, /start_job will return now")
 
         # Get SELLER_VKEY from environment
         seller_vkey = os.getenv("SELLER_VKEY", "")
@@ -674,13 +697,14 @@ async def start_job(request: Request, data: StartJobRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 async def handle_payment_status(job_id: str, payment_id: str) -> None:
     """ Executes task after payment confirmation """
+    logger.info("=" * 80)
+    logger.info(f"HANDLE_PAYMENT: Payment {payment_id} confirmed for job {job_id}")
+    logger.info(f"HANDLE_PAYMENT: Starting task execution...")
     try:
-        logger.info(f"Payment {payment_id} completed for job {job_id}, executing task...")
-        
         # Update job status to running
         jobs[job_id]["status"] = "running"
         input_data = jobs[job_id]["input_data"]
-        logger.info(f"Input data: {input_data}")
+        logger.info(f"HANDLE_PAYMENT: Input data for job {job_id}: {input_data}")
 
         # Check for failure injection before task execution
         failure_type = failure_injector.should_fail(
@@ -802,10 +826,12 @@ async def handle_payment_status(job_id: str, payment_id: str) -> None:
                 return
 
         # Execute the AI task
+        logger.info(f"TASK_EXEC: Starting task execution for job {job_id}")
         try:
             result = await execute_agentic_task(input_data)
             result_dict = result.json_dict  # type: ignore
-            logger.info(f"task completed for job {job_id}")
+            logger.info(f"TASK_EXEC: Task execution completed successfully for job {job_id}")
+            logger.info(f"TASK_EXEC: Result type: {type(result)}, Result dict keys: {list(result_dict.keys()) if isinstance(result_dict, dict) else 'N/A'}")
         except ValueError as e:
             # Input validation error
             logger.error(f"Task execution failed due to invalid input: {str(e)}")
@@ -839,17 +865,27 @@ async def handle_payment_status(job_id: str, payment_id: str) -> None:
         
         # Mark payment as completed on Masumi
         # Use a shorter string for the result hash
-        await payment_instances[job_id].complete_payment(payment_id, result_dict)
-        logger.info(f"Payment completed for job {job_id}")
+        logger.info(f"JOB_COMPLETE: Sending results to payment service for job {job_id}")
+        try:
+            await payment_instances[job_id].complete_payment(payment_id, result_dict)
+            logger.info(f"JOB_COMPLETE: Payment completed successfully for job {job_id}")
+        except Exception as e:
+            logger.error(f"JOB_COMPLETE: Error completing payment for job {job_id}: {str(e)}", exc_info=True)
+            raise  # Re-raise to be caught by outer exception handler
 
         # Update job status
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["payment_status"] = "completed"
         jobs[job_id]["result"] = result
+        logger.info(f"JOB_COMPLETE: Job {job_id} marked as completed successfully")
 
         # Stop monitoring payment status
         if job_id in payment_instances:
-            payment_instances[job_id].stop_status_monitoring()
+            try:
+                payment_instances[job_id].stop_status_monitoring()
+                logger.info(f"JOB_COMPLETE: Stopped payment monitoring for job {job_id}")
+            except Exception as e:
+                logger.warning(f"JOB_COMPLETE: Error stopping payment monitoring for job {job_id}: {str(e)}")
             del payment_instances[job_id]
     except Exception as e:
         logger.error(f"Error processing payment {payment_id} for job {job_id}: {str(e)}", exc_info=True)
