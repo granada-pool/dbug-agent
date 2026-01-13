@@ -170,6 +170,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # ─────────────────────────────────────────────────────────────────────────────
 jobs = {}
 payment_instances = {}
+# Track which jobs have had their payment callback triggered to avoid duplicate execution
+payment_callbacks_triggered = set()
 
 # track server start time for uptime calculation
 server_start_time = time.time()
@@ -491,7 +493,19 @@ async def start_job(request: Request, data: StartJobRequest):
             """Wrapper to monitor payment with proper error handling"""
             try:
                 logger.info(f"PAYMENT_MONITOR: Starting payment monitoring for job {job_id}")
-                await payment.start_status_monitoring(payment_callback)
+                logger.info(f"PAYMENT_MONITOR: Payment ID: {payment_id}")
+                
+                # Add a wrapper callback to log when it's called
+                async def logged_callback(payment_id_callback: str):
+                    callback_key = f"{job_id}:{payment_id_callback}"
+                    if callback_key in payment_callbacks_triggered:
+                        logger.warning(f"PAYMENT_MONITOR: Callback already triggered for {callback_key}, skipping duplicate")
+                        return
+                    logger.info(f"PAYMENT_MONITOR: Callback triggered for payment {payment_id_callback} (job {job_id})")
+                    payment_callbacks_triggered.add(callback_key)
+                    await payment_callback(payment_id_callback)
+                
+                await payment.start_status_monitoring(logged_callback)
                 logger.info(f"PAYMENT_MONITOR: Payment monitoring completed for job {job_id}")
             except Exception as e:
                 logger.error(f"PAYMENT_MONITOR: Error in payment monitoring for job {job_id}: {str(e)}", exc_info=True)
@@ -927,8 +941,48 @@ async def get_status(job_id: str):
     if job_id in payment_instances:
         try:
             status = await payment_instances[job_id].check_payment_status()
-            job["payment_status"] = status.get("data", {}).get("status")
-            logger.info(f"Updated payment status for job {job_id}: {job['payment_status']}")
+            logger.info(f"STATUS_CHECK: Raw payment status response for job {job_id}: {status}")
+            payment_data = status.get("data", {})
+            payment_status = payment_data.get("status")
+            on_chain_state = payment_data.get("onChainState")
+            next_action = payment_data.get("nextAction")
+            logger.info(f"STATUS_CHECK: Payment status for job {job_id}: status={payment_status}, onChainState={on_chain_state}, nextAction={next_action}")
+            job["payment_status"] = payment_status
+            
+            # If payment appears to be completed on-chain but callback hasn't fired, trigger it manually
+            # Check if payment is actually paid but status monitoring hasn't detected it
+            payment_id = job.get("payment_id")
+            callback_key = f"{job_id}:{payment_id}"
+            
+            # Check various indicators that payment might be complete
+            # If onChainState exists and is not None/empty, payment might be on-chain
+            # If nextAction changes from WaitingForExternalAction, payment might be progressing
+            payment_might_be_complete = False
+            
+            if on_chain_state and on_chain_state not in [None, "None", ""]:
+                logger.info(f"STATUS_CHECK: Payment {job_id} has onChainState={on_chain_state}, checking if payment is complete")
+                payment_might_be_complete = True
+            
+            # If callback hasn't been triggered yet and payment might be complete, check manually
+            if callback_key not in payment_callbacks_triggered and payment_might_be_complete and payment_id:
+                logger.warning(f"STATUS_CHECK: Payment {job_id} may be complete but callback not triggered. Checking payment status manually...")
+                # Try to manually check if we should trigger the callback
+                # This is a fallback in case the payment monitoring library doesn't detect completion
+                try:
+                    # Check payment status directly
+                    payment_status_check = await payment_instances[job_id].check_payment_status()
+                    payment_data_check = payment_status_check.get("data", {})
+                    logger.info(f"STATUS_CHECK: Manual payment check result: {payment_data_check}")
+                    
+                    # If status indicates payment is ready, trigger callback manually
+                    # Note: This is a workaround - ideally the payment monitoring library should handle this
+                    if payment_data_check.get("nextAction") not in ["WaitingForExternalAction", None]:
+                        logger.info(f"STATUS_CHECK: Payment {job_id} appears ready, triggering callback manually")
+                        payment_callbacks_triggered.add(callback_key)
+                        # Trigger handle_payment_status directly in background (same as callback would do)
+                        asyncio.create_task(handle_payment_status(job_id, payment_id))
+                except Exception as e:
+                    logger.error(f"STATUS_CHECK: Error manually checking payment status: {str(e)}", exc_info=True)
         except ValueError as e:
             logger.warning(f"Error checking payment status: {str(e)}")
             job["payment_status"] = "unknown"
