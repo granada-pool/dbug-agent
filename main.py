@@ -476,6 +476,20 @@ async def start_job(request: Request, data: StartJobRequest):
             logger.error(f"START_JOB: Error creating payment request: {str(e)}", exc_info=True)
             raise
 
+        # Parse payByTime for timeout tracking
+        payment_data_for_storage = payment_request["data"]
+        pay_by_time_iso = payment_data_for_storage.get("payByTime")
+        pay_by_time_unix_storage = None
+        if pay_by_time_iso:
+            try:
+                if isinstance(pay_by_time_iso, str):
+                    dt = datetime.fromisoformat(pay_by_time_iso.replace('Z', '+00:00'))
+                    pay_by_time_unix_storage = int(dt.timestamp())
+                elif isinstance(pay_by_time_iso, (int, float)):
+                    pay_by_time_unix_storage = int(pay_by_time_iso) if pay_by_time_iso < 1e10 else int(pay_by_time_iso / 1000)
+            except Exception as e:
+                logger.warning(f"START_JOB: Could not parse payByTime for storage: {e}")
+        
         # Store job info (Awaiting payment)
         jobs[job_id] = {
             "status": "awaiting_payment",
@@ -483,7 +497,9 @@ async def start_job(request: Request, data: StartJobRequest):
             "payment_id": payment_id,
             "input_data": input_data_dict,
             "result": None,
-            "identifier_from_purchaser": identifier_from_purchaser
+            "identifier_from_purchaser": identifier_from_purchaser,
+            "pay_by_time": pay_by_time_unix_storage,  # Store payment deadline for timeout checking
+            "created_at": time.time()  # Store creation time
         }
 
         async def payment_callback(payment_id: str):
@@ -495,6 +511,11 @@ async def start_job(request: Request, data: StartJobRequest):
                 logger.info(f"PAYMENT_MONITOR: Starting payment monitoring for job {job_id}")
                 logger.info(f"PAYMENT_MONITOR: Payment ID: {payment_id}")
                 
+                # Get payment deadline for timeout checking
+                pay_by_time = jobs[job_id].get("pay_by_time")
+                if pay_by_time:
+                    logger.info(f"PAYMENT_MONITOR: Payment deadline (payByTime) for job {job_id}: {pay_by_time} ({datetime.fromtimestamp(pay_by_time).isoformat()})")
+                
                 # Add a wrapper callback to log when it's called
                 async def logged_callback(payment_id_callback: str):
                     callback_key = f"{job_id}:{payment_id_callback}"
@@ -505,8 +526,56 @@ async def start_job(request: Request, data: StartJobRequest):
                     payment_callbacks_triggered.add(callback_key)
                     await payment_callback(payment_id_callback)
                 
-                await payment.start_status_monitoring(logged_callback)
+                # Start payment monitoring
+                monitoring_task = payment.start_status_monitoring(logged_callback)
+                
+                # Also start a timeout checker that monitors if payment deadline passes
+                async def check_payment_timeout():
+                    if not pay_by_time:
+                        return
+                    
+                    while True:
+                        await asyncio.sleep(30)  # Check every 30 seconds
+                        
+                        # Check if job still exists and is still awaiting payment
+                        if job_id not in jobs:
+                            break
+                        
+                        job = jobs[job_id]
+                        if job.get("status") != "awaiting_payment":
+                            break  # Job is no longer awaiting payment
+                        
+                        current_time = time.time()
+                        if current_time > pay_by_time:
+                            # Payment deadline has passed
+                            logger.warning(f"PAYMENT_TIMEOUT: Payment deadline passed for job {job_id}")
+                            logger.warning(f"PAYMENT_TIMEOUT: Current time: {current_time} ({datetime.fromtimestamp(current_time).isoformat()})")
+                            logger.warning(f"PAYMENT_TIMEOUT: Deadline was: {pay_by_time} ({datetime.fromtimestamp(pay_by_time).isoformat()})")
+                            
+                            # Mark job as failed due to payment timeout
+                            jobs[job_id]["status"] = "failed"
+                            jobs[job_id]["payment_status"] = "timeout"
+                            jobs[job_id]["error"] = f"Payment deadline expired. Payment was not completed on-chain before payByTime ({datetime.fromtimestamp(pay_by_time).isoformat()})"
+                            
+                            # Stop monitoring
+                            if job_id in payment_instances:
+                                try:
+                                    payment_instances[job_id].stop_status_monitoring()
+                                except:
+                                    pass
+                                del payment_instances[job_id]
+                            
+                            logger.error(f"PAYMENT_TIMEOUT: Job {job_id} marked as failed due to payment timeout")
+                            break
+                
+                # Start timeout checker in background
+                timeout_checker_task = asyncio.create_task(check_payment_timeout())
+                
+                await monitoring_task
                 logger.info(f"PAYMENT_MONITOR: Payment monitoring completed for job {job_id}")
+                
+                # Cancel timeout checker if monitoring completes
+                timeout_checker_task.cancel()
             except Exception as e:
                 logger.error(f"PAYMENT_MONITOR: Error in payment monitoring for job {job_id}: {str(e)}", exc_info=True)
                 # Update job status to failed if monitoring fails
@@ -924,6 +993,17 @@ async def get_status(job_id: str):
 
     job = jobs[job_id]
     
+    # Check if payment deadline has passed
+    pay_by_time = job.get("pay_by_time")
+    if pay_by_time and job.get("status") == "awaiting_payment":
+        current_time = time.time()
+        if current_time > pay_by_time:
+            logger.warning(f"STATUS_CHECK: Payment deadline expired for job {job_id}")
+            logger.warning(f"STATUS_CHECK: Current time: {current_time}, Deadline: {pay_by_time}")
+            job["status"] = "failed"
+            job["payment_status"] = "timeout"
+            job["error"] = f"Payment deadline expired. Payment was not completed on-chain before payByTime ({datetime.fromtimestamp(pay_by_time).isoformat()})"
+    
     # Check for failure injection on status check
     input_data = job.get("input_data", {})
     failure_type = failure_injector.should_fail(
@@ -1004,6 +1084,10 @@ async def get_status(job_id: str):
     if job["status"] == "completed" and result:
         status_response["result"] = result
     
+    # Add error if job failed
+    if job["status"] == "failed" and job.get("error"):
+        status_response["error"] = job["error"]
+    
     # Add input_required if job is awaiting input (MIP-003 requirement)
     if job["status"] == "awaiting_input":
         status_response["input_required"] = True
@@ -1011,6 +1095,17 @@ async def get_status(job_id: str):
     # Add additional fields for backward compatibility
     status_response["job_id"] = job_id
     status_response["payment_status"] = job.get("payment_status", "unknown")
+    
+    # Add payment deadline information if available
+    pay_by_time = job.get("pay_by_time")
+    if pay_by_time:
+        status_response["pay_by_time"] = pay_by_time
+        current_time = time.time()
+        if current_time < pay_by_time:
+            status_response["payment_deadline_seconds_remaining"] = int(pay_by_time - current_time)
+        else:
+            status_response["payment_deadline_expired"] = True
+    
     if result and "result" not in status_response:
         status_response["result"] = result
     
