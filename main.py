@@ -570,17 +570,54 @@ async def start_job(request: Request, data: StartJobRequest):
                 logger.warning(f"START_JOB: Could not parse timestamp {ts}, using current time: {e}")
                 return int(time.time())
         
+        # Parse timestamps from payment service response
         submit_result_time_unix = parse_timestamp_to_unix(submit_result_time) if submit_result_time else int(time.time())
         unlock_time_unix = parse_timestamp_to_unix(unlock_time) if unlock_time else int(time.time())
         external_dispute_unlock_time_unix = parse_timestamp_to_unix(external_dispute_unlock_time) if external_dispute_unlock_time else int(time.time())
         
-        # Use payByTime from payment service if available, otherwise use submitResultTime
+        # Calculate payByTime: must be at least 5 minutes BEFORE submitResultTime
+        # MIP-003 requirement: payByTime < submitResultTime (minimum 5 minutes difference)
+        MIN_PAYMENT_DEADLINE_GAP_SECONDS = 300  # 5 minutes in seconds
+        
         if pay_by_time:
             pay_by_time_unix = parse_timestamp_to_unix(pay_by_time)
+            # Validate that payByTime is before submitResultTime
+            if pay_by_time_unix >= submit_result_time_unix:
+                logger.warning(f"START_JOB: payByTime ({pay_by_time_unix}) >= submitResultTime ({submit_result_time_unix}), adjusting...")
+                # Set payByTime to be 5 minutes before submitResultTime
+                pay_by_time_unix = submit_result_time_unix - MIN_PAYMENT_DEADLINE_GAP_SECONDS
         else:
-            # Fallback: use submitResultTime as payByTime (payment deadline)
-            pay_by_time_unix = submit_result_time_unix
-            logger.info("START_JOB: payByTime not in payment response, using submitResultTime")
+            # Calculate payByTime as 5 minutes before submitResultTime
+            pay_by_time_unix = submit_result_time_unix - MIN_PAYMENT_DEADLINE_GAP_SECONDS
+            logger.info(f"START_JOB: payByTime not in payment response, calculated as {MIN_PAYMENT_DEADLINE_GAP_SECONDS}s before submitResultTime")
+        
+        # Ensure proper ordering: payByTime < submitResultTime < unlockTime < externalDisputeUnlockTime
+        # Validate and adjust if necessary
+        if pay_by_time_unix >= submit_result_time_unix:
+            logger.error(f"START_JOB: Invalid timestamp order - payByTime ({pay_by_time_unix}) >= submitResultTime ({submit_result_time_unix})")
+            pay_by_time_unix = submit_result_time_unix - MIN_PAYMENT_DEADLINE_GAP_SECONDS
+        
+        if submit_result_time_unix >= unlock_time_unix:
+            logger.warning(f"START_JOB: submitResultTime ({submit_result_time_unix}) >= unlockTime ({unlock_time_unix}), adjusting unlockTime...")
+            unlock_time_unix = submit_result_time_unix + 600  # 10 minutes after submitResultTime
+        
+        if unlock_time_unix >= external_dispute_unlock_time_unix:
+            logger.warning(f"START_JOB: unlockTime ({unlock_time_unix}) >= externalDisputeUnlockTime ({external_dispute_unlock_time_unix}), adjusting...")
+            external_dispute_unlock_time_unix = unlock_time_unix + 600  # 10 minutes after unlockTime
+        
+        # Log final timestamp values for debugging
+        logger.info(f"START_JOB: Final timestamps (Unix seconds):")
+        logger.info(f"START_JOB:   payByTime: {pay_by_time_unix} ({datetime.fromtimestamp(pay_by_time_unix).isoformat()})")
+        logger.info(f"START_JOB:   submitResultTime: {submit_result_time_unix} ({datetime.fromtimestamp(submit_result_time_unix).isoformat()})")
+        logger.info(f"START_JOB:   unlockTime: {unlock_time_unix} ({datetime.fromtimestamp(unlock_time_unix).isoformat()})")
+        logger.info(f"START_JOB:   externalDisputeUnlockTime: {external_dispute_unlock_time_unix} ({datetime.fromtimestamp(external_dispute_unlock_time_unix).isoformat()})")
+        
+        # Verify ordering
+        assert pay_by_time_unix < submit_result_time_unix, f"payByTime must be before submitResultTime"
+        assert submit_result_time_unix < unlock_time_unix, f"submitResultTime must be before unlockTime"
+        assert unlock_time_unix < external_dispute_unlock_time_unix, f"unlockTime must be before externalDisputeUnlockTime"
+        gap_seconds = submit_result_time_unix - pay_by_time_unix
+        assert gap_seconds >= MIN_PAYMENT_DEADLINE_GAP_SECONDS, f"payByTime must be at least {MIN_PAYMENT_DEADLINE_GAP_SECONDS}s before submitResultTime (gap: {gap_seconds}s)"
         
         # MIP-003 compliant response format
         response_data = {
