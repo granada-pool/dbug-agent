@@ -575,6 +575,15 @@ async def start_job(request: Request, data: StartJobRequest):
             )
         
         pay_by_time_unix = parse_timestamp_to_unix(pay_by_time)
+        current_time_unix = int(time.time())
+        
+        # Sokosumi requirement: payByTime must be in the future (max. 5 minutes)
+        # Set payByTime to be exactly 5 minutes (300 seconds) in the future to maximize the window
+        MAX_PAY_BY_TIME_OFFSET = 300  # 5 minutes in seconds
+        
+        # Always set payByTime to be 5 minutes in the future to comply with Sokosumi requirement
+        pay_by_time_unix = current_time_unix + MAX_PAY_BY_TIME_OFFSET
+        logger.info(f"START_JOB: Setting payByTime to {MAX_PAY_BY_TIME_OFFSET}s (5 minutes) in the future: {pay_by_time_unix}")
         
         # Calculate other timestamps based on payByTime
         # submitResultTime = payByTime + 4308483 seconds
