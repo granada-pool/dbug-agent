@@ -548,10 +548,9 @@ async def start_job(request: Request, data: StartJobRequest):
         pay_by_time = payment_data.get("payByTime")  # Get payByTime from payment service
         input_hash = payment_data.get("inputHash")
         
-        # Convert ISO timestamp strings to Unix timestamps (seconds) for MIP-003 compliance
-        # MIP-003 requires all timestamps as int (Unix timestamp in seconds)
+        # Convert payByTime to Unix timestamp (seconds) if needed
         def parse_timestamp_to_unix(ts):
-            """Convert ISO timestamp string to Unix timestamp (seconds)"""
+            """Convert ISO timestamp string or int to Unix timestamp (seconds)"""
             try:
                 if isinstance(ts, str):
                     # Parse ISO format timestamp and convert to Unix timestamp in seconds
@@ -567,24 +566,30 @@ async def start_job(request: Request, data: StartJobRequest):
                 logger.warning(f"START_JOB: Could not parse timestamp {ts}, using current time: {e}")
                 return int(time.time())
         
-        # Simple calculation: Use payByTime as base and add 1000 seconds for each subsequent timestamp
-        TIMESTAMP_GAP_SECONDS = 1000  # 1000 seconds gap between each timestamp
+        # Get payByTime from payment service and parse it
+        if not pay_by_time:
+            logger.error("START_JOB: payByTime not found in payment service response")
+            raise HTTPException(
+                status_code=500,
+                detail="Payment service did not return payByTime"
+            )
         
-        if pay_by_time:
-            # Parse payByTime from payment service
-            pay_by_time_unix = parse_timestamp_to_unix(pay_by_time)
-        else:
-            # If payByTime not provided, use current time
-            pay_by_time_unix = int(time.time())
-            logger.warning(f"START_JOB: payByTime not in payment response, using current time: {pay_by_time_unix}")
+        pay_by_time_unix = parse_timestamp_to_unix(pay_by_time)
         
-        # Calculate all timestamps based on payByTime with 1000 second gaps
-        submit_result_time_unix = pay_by_time_unix + TIMESTAMP_GAP_SECONDS
-        unlock_time_unix = submit_result_time_unix + TIMESTAMP_GAP_SECONDS
-        external_dispute_unlock_time_unix = unlock_time_unix + TIMESTAMP_GAP_SECONDS
+        # Calculate other timestamps based on payByTime
+        # submitResultTime = payByTime + 4308483 seconds
+        # unlockTime = submitResultTime + 1000 seconds
+        # externalDisputeUnlockTime = unlockTime + 1000 seconds
+        SUBMIT_RESULT_OFFSET = 4308483  # Offset from payByTime to submitResultTime
+        UNLOCK_TIME_OFFSET = 1000  # Offset from submitResultTime to unlockTime
+        EXTERNAL_DISPUTE_OFFSET = 1000  # Offset from unlockTime to externalDisputeUnlockTime
+        
+        submit_result_time_unix = pay_by_time_unix + SUBMIT_RESULT_OFFSET
+        unlock_time_unix = submit_result_time_unix + UNLOCK_TIME_OFFSET
+        external_dispute_unlock_time_unix = unlock_time_unix + EXTERNAL_DISPUTE_OFFSET
         
         # Log final timestamp values for debugging
-        logger.info(f"START_JOB: Calculated timestamps (Unix seconds, gaps of {TIMESTAMP_GAP_SECONDS}s):")
+        logger.info(f"START_JOB: Calculated timestamps (Unix seconds):")
         logger.info(f"START_JOB:   payByTime: {pay_by_time_unix} ({datetime.fromtimestamp(pay_by_time_unix).isoformat()})")
         logger.info(f"START_JOB:   submitResultTime: {submit_result_time_unix} ({datetime.fromtimestamp(submit_result_time_unix).isoformat()})")
         logger.info(f"START_JOB:   unlockTime: {unlock_time_unix} ({datetime.fromtimestamp(unlock_time_unix).isoformat()})")
