@@ -578,8 +578,8 @@ async def start_job(request: Request, data: StartJobRequest):
         current_time_unix = int(time.time())
         
         # Sokosumi requirement: payByTime must be in the future (max. 5 minutes)
-        # Set payByTime to be exactly 5 minutes (300 seconds) in the future to maximize the window
-        MAX_PAY_BY_TIME_OFFSET = 300  # 5 minutes in seconds
+        # Set payByTime to be exactly 3 minutes (200 seconds) in the future to maximize the window
+        MAX_PAY_BY_TIME_OFFSET = 200  # 3 minutes in seconds
         
         # Always set payByTime to be 5 minutes in the future to comply with Sokosumi requirement
         pay_by_time_unix = current_time_unix + MAX_PAY_BY_TIME_OFFSET
