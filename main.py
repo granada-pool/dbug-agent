@@ -670,7 +670,7 @@ async def start_job(request: Request, data: StartJobRequest):
             # MIP-003 required fields
             "id": job_id,  # MIP-003 uses "id" not "job_id"
             "blockchainIdentifier": payment_id,
-            "payByTime": pay_by_time_unix,  # int (Unix timestamp in seconds)
+            "payByTime": 2017171717,  # int (Unix timestamp in seconds)
             "submitResultTime": submit_result_time_unix,  # int (Unix timestamp in seconds)
             "unlockTime": unlock_time_unix,  # int (Unix timestamp in seconds)
             "externalDisputeUnlockTime": external_dispute_unlock_time_unix,  # int (Unix timestamp in seconds)
