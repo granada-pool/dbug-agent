@@ -577,51 +577,51 @@ async def start_job(request: Request, data: StartJobRequest):
         
         # Calculate payByTime: must be at least 5 minutes BEFORE submitResultTime
         # MIP-003 requirement: payByTime < submitResultTime (minimum 5 minutes difference)
-        # payByTime should be set significantly earlier than submitResultTime to give users
-        # reasonable time to complete payment. Based on example values, payByTime should be
-        # set much earlier (e.g., 12+ hours before submitResultTime is common)
+        # Sokosumi requirement: payByTime must be at least 1000 seconds (16.67 minutes) before submitResultTime
         MIN_PAYMENT_DEADLINE_GAP_SECONDS = 300  # Minimum 5 minutes in seconds (MIP-003 requirement)
-        DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS = 43200  # Default: 12 hours before submitResultTime
+        REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS = 1000  # Required: 1000 seconds (~16.67 minutes) before submitResultTime
+        DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS = 43200  # Default: 12 hours before submitResultTime (when submitResultTime is far in future)
         
         current_time_unix = int(time.time())
         
         if pay_by_time:
             pay_by_time_unix = parse_timestamp_to_unix(pay_by_time)
-            # Validate that payByTime is before submitResultTime
+            # Validate that payByTime is before submitResultTime and has required gap
+            gap_seconds = submit_result_time_unix - pay_by_time_unix
+            
             if pay_by_time_unix >= submit_result_time_unix:
                 logger.warning(f"START_JOB: payByTime ({pay_by_time_unix}) >= submitResultTime ({submit_result_time_unix}), adjusting...")
-                # Set payByTime to be significantly before submitResultTime (12 hours default)
+                # Set payByTime to be required gap before submitResultTime
                 time_until_submit_result = submit_result_time_unix - current_time_unix
-                if time_until_submit_result > DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS:
-                    pay_by_time_unix = submit_result_time_unix - DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS
+                if time_until_submit_result > REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS:
+                    pay_by_time_unix = submit_result_time_unix - REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS
                 else:
                     # If submitResultTime is soon, use minimum gap
                     pay_by_time_unix = submit_result_time_unix - MIN_PAYMENT_DEADLINE_GAP_SECONDS
-            else:
-                # Even if payByTime is valid, check if it's too close to submitResultTime
-                gap_seconds = submit_result_time_unix - pay_by_time_unix
-                if gap_seconds < DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS:
-                    # If gap is less than 12 hours, adjust to use default gap (if possible)
-                    time_until_submit_result = submit_result_time_unix - current_time_unix
-                    if time_until_submit_result > DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS:
-                        logger.info(f"START_JOB: payByTime gap ({gap_seconds}s) is too small, adjusting to {DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS}s before submitResultTime")
-                        pay_by_time_unix = submit_result_time_unix - DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS
-                    else:
-                        logger.info(f"START_JOB: payByTime gap ({gap_seconds}s) is acceptable but small - submitResultTime is soon")
+            elif gap_seconds < REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS:
+                # payByTime is valid but gap is too small (less than 1000 seconds)
+                logger.warning(f"START_JOB: payByTime gap ({gap_seconds}s) is too small, adjusting to {REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS}s before submitResultTime")
+                time_until_submit_result = submit_result_time_unix - current_time_unix
+                if time_until_submit_result > REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS:
+                    pay_by_time_unix = submit_result_time_unix - REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS
+                else:
+                    # If submitResultTime is soon, ensure at least minimum gap
+                    pay_by_time_unix = submit_result_time_unix - MIN_PAYMENT_DEADLINE_GAP_SECONDS
+                    logger.warning(f"START_JOB: submitResultTime is soon, using minimum gap of {MIN_PAYMENT_DEADLINE_GAP_SECONDS}s")
             # Also ensure payByTime is not in the past
             if pay_by_time_unix < current_time_unix:
                 logger.warning(f"START_JOB: payByTime ({pay_by_time_unix}) is in the past, adjusting to current time + buffer...")
                 pay_by_time_unix = current_time_unix + 60  # At least 1 minute from now
         else:
             # Calculate payByTime: should be significantly before submitResultTime
-            # Default to 12 hours before submitResultTime, or minimum gap if submitResultTime is soon
+            # Use required gap (1000 seconds) when possible, or minimum gap if submitResultTime is soon
             time_until_submit_result = submit_result_time_unix - current_time_unix
             
-            if time_until_submit_result > DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS:
-                # If submitResultTime is far in the future (more than 12 hours), set payByTime to 12 hours before it
-                pay_by_time_unix = submit_result_time_unix - DEFAULT_PAYMENT_DEADLINE_GAP_SECONDS
+            if time_until_submit_result > REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS:
+                # If submitResultTime is far enough in the future, set payByTime to required gap (1000 seconds) before it
+                pay_by_time_unix = submit_result_time_unix - REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS
             else:
-                # If submitResultTime is soon (less than 12 hours away), ensure payByTime is:
+                # If submitResultTime is soon (less than required gap away), ensure payByTime is:
                 # - At least 1 minute from now (not in the past)
                 # - At least 5 minutes before submitResultTime (MIP-003 minimum)
                 pay_by_time_unix = max(
@@ -630,14 +630,18 @@ async def start_job(request: Request, data: StartJobRequest):
                 )
             
             gap_seconds = submit_result_time_unix - pay_by_time_unix
-            gap_hours = gap_seconds / 3600
-            logger.info(f"START_JOB: payByTime not in payment response, calculated as {gap_seconds}s ({gap_hours:.1f} hours) before submitResultTime")
+            gap_minutes = gap_seconds / 60
+            logger.info(f"START_JOB: payByTime not in payment response, calculated as {gap_seconds}s ({gap_minutes:.1f} minutes) before submitResultTime")
         
         # Ensure proper ordering: payByTime < submitResultTime < unlockTime < externalDisputeUnlockTime
         # Validate and adjust if necessary
+        final_gap = submit_result_time_unix - pay_by_time_unix
         if pay_by_time_unix >= submit_result_time_unix:
             logger.error(f"START_JOB: Invalid timestamp order - payByTime ({pay_by_time_unix}) >= submitResultTime ({submit_result_time_unix})")
-            pay_by_time_unix = submit_result_time_unix - MIN_PAYMENT_DEADLINE_GAP_SECONDS
+            pay_by_time_unix = submit_result_time_unix - REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS
+        elif final_gap < REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS:
+            logger.warning(f"START_JOB: Final gap ({final_gap}s) is less than required ({REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS}s), adjusting payByTime...")
+            pay_by_time_unix = submit_result_time_unix - REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS
         
         if submit_result_time_unix >= unlock_time_unix:
             logger.warning(f"START_JOB: submitResultTime ({submit_result_time_unix}) >= unlockTime ({unlock_time_unix}), adjusting unlockTime...")
@@ -658,8 +662,8 @@ async def start_job(request: Request, data: StartJobRequest):
         assert pay_by_time_unix < submit_result_time_unix, f"payByTime must be before submitResultTime"
         assert submit_result_time_unix < unlock_time_unix, f"submitResultTime must be before unlockTime"
         assert unlock_time_unix < external_dispute_unlock_time_unix, f"unlockTime must be before externalDisputeUnlockTime"
-        gap_seconds = submit_result_time_unix - pay_by_time_unix
-        assert gap_seconds >= MIN_PAYMENT_DEADLINE_GAP_SECONDS, f"payByTime must be at least {MIN_PAYMENT_DEADLINE_GAP_SECONDS}s before submitResultTime (gap: {gap_seconds}s)"
+        final_gap_seconds = submit_result_time_unix - pay_by_time_unix
+        assert final_gap_seconds >= REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS, f"payByTime must be at least {REQUIRED_PAYMENT_DEADLINE_GAP_SECONDS}s before submitResultTime (gap: {final_gap_seconds}s)"
         
         # MIP-003 compliant response format
         response_data = {
